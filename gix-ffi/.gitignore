@@ -9,6 +9,9 @@
 
 /bindings/**/obj
 /bindings/**/bin
+
+# Visual Studio droppings. GixSharp.slnx is deliberate and IS tracked, so
+# only the generated .sln form is ignored here.
 *.sln
 *.sln.sqlite
 .vs/
