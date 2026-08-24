@@ -111,9 +111,10 @@ for `blocking-client` + `async-client` together.
    iterator APIs. Eager materialisation remains acceptable only when a result
    is deliberately known to be small and bounded. General iteration uses the
    streaming architecture below.
-7. **One coarse error type for now** (`GixError` -> `GixErrorKind`).
-   Splitting into per-domain types is a breaking change, so defer until
-   there are enough operations to design a real taxonomy.
+7. **The coarse error ABI is POC-only** (`GixError` -> `GixErrorKind`).
+   Full coverage requires a stable error taxonomy before breadth resumes;
+   retrofitting it after consumers depend on coarse exceptions would make
+   every later correction more expensive and potentially breaking.
 8. **Nothing generated escapes the managed layer.** Enforced by
    `ManagedRepositorySignatures_DoNotExposeGeneratedResources`, a reflection
    test. Keep that test passing as the surface grows.
@@ -201,13 +202,71 @@ serialising unrelated calls.
 
 ## P0 - streaming architecture
 
-Full coverage requires one coherent streaming **lifecycle** with two distinct
-data-plane shapes. Cursor design and large-byte streaming must be settled
-together before either ABI is treated as frozen.
+Full coverage needs one coherent streaming **lifecycle**, but byte streams and
+structured record streams should not be forced through the same transfer
+primitive. Settle the byte-stream data plane first, then freeze the cursor
+contract against those lifecycle constraints.
 
-**Structured record streams** include rev-walk, full-repo dirwalk, status,
+### P0a - byte streams first
+
+Bulk byte streams include blobs, large patches, archives, pack/network content,
+filter output and similar data. `ffi::Vec<u8>` is not the general solution:
+it materialises the whole payload in Rust-owned memory and `ToArray()` copies
+it again into managed memory. That is acceptable for small Git byte strings,
+not for large content.
+
+Interoptopus already supports `ffi::SliceMut<T>` as a borrowed mutable slice.
+The generated C# pins a managed array and passes pointer + length without an
+FFI copy, so caller-buffer pull is viable at the ABI boundary.
+
+There is an important gix constraint: ordinary object lookup is currently
+`Find::try_find(id, &mut Vec<u8>)`. Loose-object lookup resizes that `Vec` to
+the full decompressed size, and packed/delta decoding is also built around
+`Vec<u8>` result/scratch buffers. Therefore caller-buffer blob reads are not
+end-to-end zero-copy today: gix still materialises the decoded object in Rust,
+but caller-buffer pull removes the second full Rust-to-managed allocation and
+copy and keeps the managed API compatible with genuinely streaming sources.
+
+The leading byte-stream contract is therefore a stateful native reader with a
+caller-owned reusable buffer, exposed managed-side as `Stream.Read(Span<byte>)`
+semantics or equivalent. EOF is learned by reading to exhaustion; known length
+may be exposed as metadata when cheap, but the protocol does not require a
+size-query/read two-call dance.
+
+Three transfer shapes should still be measured before the byte ABI is frozen:
+
+- **Caller-supplied buffer** - preferred direction. Works with existing gix
+  materialised blobs and can become direct streaming when the underlying gix
+  source implements `Read`.
+- **Scoped callback/view** - can expose an already-materialised Rust buffer to
+  managed code without another bulk copy, but introduces reverse P/Invoke,
+  strict scoped lifetime, reentrancy and managed-exception concerns. Keep as a
+  possible specialised fast path, not the default stream model.
+- **Chunked `Vec<u8>` cursor** - unifies the `next()` shape mechanically but
+  adds chunk allocation/copying and prevents direct use of caller-owned
+  reusable buffers. Do not adopt it as the default merely for API uniformity.
+
+Benchmark in two distinct scenarios so gix materialisation is not confused
+with FFI cost:
+
+1. a large blob: compare whole `ffi::Vec<u8>` + managed copy, caller-buffer
+   pull from a materialised native blob, scoped view/callback, and chunked
+   `Vec<u8>` transfer;
+2. a genuinely streaming gix source such as `gix-worktree-stream::Entry` (or
+   another `Read`-based path): compare caller-buffer pull against callback and
+   chunked transfer to verify that the ABI preserves real native streaming.
+
+The decision criterion is not only throughput. Measure peak native memory,
+peak managed memory, allocations, copies, call count and cancellation/disposal
+behaviour. The managed contract must not encode today's ODB materialisation if
+that implementation can improve later.
+
+### P0b - structured cursors second
+
+Structured record streams include rev-walk, full-repo dirwalk, status,
 references/reflogs, tree changes, object enumeration, parser tokens, pack
-indexes and similar APIs. The accepted direction is:
+indexes and similar APIs. After P0a establishes the shared stream lifecycle,
+freeze the record-stream contract around:
 
 - managed pull enumeration (`IEnumerable<T>` / `IEnumerator<T>` semantics)
 - bounded batches across the FFI boundary to amortise native-call overhead
@@ -225,60 +284,60 @@ indexes and similar APIs. The accepted direction is:
   some gix iterators can yield recoverable/intermediate `Err` items
 - a cursor is single-consumer unless an API explicitly says otherwise
 
-This one consumer contract does **not** require one Rust implementation.
-`rev_walk` and reference iterators borrow repositories; `dirwalk` and status
-already contain producer/interrupt patterns; tree diff is callback-driven but
-`Change::detach()` produces an owned change. They can all adapt to the same
-managed consumption model.
+This one managed consumer contract does **not** require one Rust
+implementation. `rev_walk` and reference iterators borrow repositories;
+`dirwalk` and status already contain producer/interrupt patterns; tree diff is
+callback-driven but `Change::detach()` produces an owned change. They can all
+adapt to the same managed consumption model.
 
-**Bulk byte streams** include blobs, large patches, archives, pack/network
-content and similar data. Do not model these as `Cursor<byte>` by default.
-The expected data-plane shape is caller-buffer pull (for example a
-`Read(Span<byte>)`-style managed surface) or an equivalent chunked primitive,
-with the same ownership, disposal, cancellation, backpressure and error
-semantics as structured cursors. The exact byte-stream ABI remains open until
-a representative large blob/patch case is prototyped.
-
-The detached-payload rule above must gain an automated test/check analogous
-to the existing managed reflection invariant. The handoff intentionally does
-not prescribe the mechanism yet; the requirement is that violations become a
+The detached-payload rule above must gain an automated test/check analogous to
+the existing managed reflection invariant. The handoff intentionally does not
+prescribe the mechanism yet; the requirement is that violations become a
 build/test failure rather than a review convention.
 
-Do **not** add a generic cursor abstraction to Interoptopus yet. Prove the
-contract first in `gix-ffi` with at least one repo-borrowing structured stream
-(`rev_walk`) and one naturally streaming workload (`dirwalk` or `status`),
-plus one bulk-byte reader. Once those share a coherent lifecycle, extract the
-reusable Interoptopus pattern from observed requirements.
+Do **not** add a generic stream/cursor abstraction to Interoptopus yet. Prove
+the byte reader first, then the cursor contract in `gix-ffi` with at least one
+repo-borrowing stream (`rev_walk`) and one naturally streaming workload
+(`dirwalk` or `status`). Extract a reusable Interoptopus pattern only from
+requirements demonstrated by those prototypes.
 
 ## Open architecture questions - priority order
 
 | Priority | Open question | What must be decided |
 |---:|---|---|
-| **P0** | **Streaming: structured cursors + bulk bytes** | Shared ownership/lifecycle/error/cancellation/backpressure contract; batched structured pull; caller-buffer/chunked byte transfer; final outcomes; enforcement of ownership-closed payloads. |
-| **P1** | **Stateful resources / transactions** | Index editing, refs/config transactions, worktree mutation, writers/editors and reusable diff caches need explicit ownership, disposal and commit/rollback rules. |
-| **P2** | **Callbacks, progress, cancellation, credentials** | Network and long-running operations need a single policy for managed callbacks, worker-thread invocation, reentrancy, cancellation and managed-exception propagation. Managed callbacks should not become the default record-stream transport merely because Interoptopus supports them. |
-| **P3** | **Error ABI** | The current coarse `GixErrorKind` is insufficient for full coverage, but mirroring every Rust error type is impractical. Define a stable domain/context/source taxonomy before the surface makes it expensive to change. |
+| **P0a** | **Byte-stream data plane** | Benchmark caller-buffer pull, scoped view/callback and chunked `Vec<u8>` transfer against both a large materialised blob and a genuinely streaming gix `Read` source. Freeze the byte ABI only after throughput, allocations, copies, peak memory and cancellation/disposal are understood. Caller-buffer pull is the leading design. |
+| **P0b** | **Structured cursors** | With the stream lifecycle constrained by P0a, freeze bounded batched managed pull, direct-vs-producer/channel adaptation, item-error vs terminal-failure semantics, final outcomes, single-consumer behaviour and automated ownership-closed payload enforcement. |
+| **P1** | **Error ABI** | The current coarse `GixErrorKind` is insufficient for full coverage, and the old reason for deferral no longer applies once breadth resumes. Define a stable domain/context/source taxonomy before many more consumers start catching the current shape. |
+| **P2** | **Stateful resources / transactions** | Index editing, refs/config transactions, worktree mutation, writers/editors and reusable diff caches need explicit ownership, disposal and commit/rollback rules. |
+| **P3** | **Callbacks, progress, cancellation, credentials** | Network and long-running operations need a single policy for managed callbacks, worker-thread invocation, reentrancy, cancellation and managed-exception propagation. Managed callbacks should not become the default record- or byte-stream transport merely because Interoptopus supports them. |
 | **P4** | **Filesystem paths vs Git bytes** | Git names/messages remain byte-faithful. OS filesystem paths need a separate platform-faithful representation and conversion policy. |
 | **P5** | **Feature/build profiles** | Full coverage meets mutually awkward blocking/async and transport feature sets. Decide whether coverage is delivered by profiles/artifacts rather than pretending all features can coexist in one binary. |
 | **P6** | **ABI evolution and API guards** | `gix-ffi::ffi_inventory()` already registers `guard!(ffi_inventory)`, and the C# backend checks the baked API hash against the loaded DLL. Keep that guard non-optional. The open work is the compatibility policy for additions and changes to enums, records and functions; use the guard salt for important behavioural/layout changes not reflected in signatures. |
-| **P7** | **Interoptopus supportability** | No cursor primitive exists today; missing `builtins_vec!` validation and the lack of a green C# snapshot baseline are maintenance risks. Prove gix-specific shapes before promoting new generic Interoptopus abstractions. |
+| **P7** | **Interoptopus supportability** | No cursor/stream primitive exists today; missing `builtins_vec!` validation and the lack of a green C# snapshot baseline are maintenance risks. Prove gix-specific shapes before promoting new generic Interoptopus abstractions. |
 
 ## Next step
 
 The managed layer is done for the POC surface, so issue `99208883` is
-effectively closed. The immediate work is **P0 streaming architecture**, not
-breadth by eager materialisation:
+effectively closed. Do not resume broad surface expansion yet. Resolve the
+high-coupling architecture in this order:
 
-1. replace the eager `rev_walk` precedent with a structured cursor prototype;
-2. exercise the same cursor lifecycle against `dirwalk` or `status`;
-3. prototype a caller-buffer bulk-byte reader on a large blob or patch;
-4. add automated ownership-closure enforcement for stream payloads;
+1. **P0a byte streams:** prototype the three transfer shapes on a large blob
+   and on a genuinely streaming gix `Read` source; measure throughput,
+   allocations, copies, peak native/managed memory, call count and
+   cancellation/disposal. Caller-buffer pull is the leading design.
+2. **P0b structured cursors:** with the byte-stream lifecycle constraints
+   known, replace the eager `rev_walk` precedent with a bounded-batch cursor
+   and exercise the same managed contract against `dirwalk` or `status`.
+3. **P1 error ABI:** define the stable error taxonomy before breadth resumes;
+   the coarse `GixErrorKind` shape is POC-only and should not become the
+   accidental long-term contract.
+4. add automated ownership-closure enforcement for stream/cursor payloads.
 5. then resume breadth module by module, pairing each Rust facade addition
    with its managed wrapper and tests and keeping rule 8 green.
 
 The target remains **full gix coverage**. Small bounded materialisation may
 still be selected locally when it is demonstrably the right API shape, but it
-is an optimisation decision, not the architecture for iteration.
+is an optimisation decision, not the architecture for iteration or bulk data.
 
 ## Also outstanding
 
