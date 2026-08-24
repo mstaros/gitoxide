@@ -28,30 +28,48 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
 
 ## Current state
 
-15 TUnit tests pass in the **main checkout** against a loaded native DLL.
+Do not trust method counts in this document - the surface moves faster than
+the prose. This section lists **capability areas**; for the exact surface
+read `src/` and `bindings/GixSharp/Managed/`, and `git log` for history.
 
-**Rust facade** - the current POC includes `Repo.open`, `git_dir`, `is_bare`,
-`head`, `rev_walk`, and `commit_info`, plus records `HeadInfo`, `CommitInfo`
-and the error enum `GixError`.
+Both layers exist and are exercised end to end by TUnit tests running in the
+**main checkout** against a loaded native DLL.
 
-**Managed layer** - `bindings/GixSharp/Managed/`:
+**Working capability areas:**
 
-- `GixRepository : IDisposable` - `Open`, `GitDir`, `IsBare`, `Head`,
-  `RevWalk`, `CommitInfo`
-- records `GixHead`, `GixCommitInfo`
-- `GixException` + `GixErrorKind`
+- repository open, discover, init
+- repository info, git dir, bareness
+- HEAD resolution
+- commit reading, history, ancestry
+- object metadata and tree ids
+- **commit writing** - object creation and commit-from-index
+- index - in progress at time of writing
+
+**Rust facade** - `src/`, split across more than one module. Records plus a
+single coarse error enum `GixError`.
+
+**Managed layer** - `bindings/GixSharp/Managed/`, a partial `GixRepository`
+across several files, with records `GixHead`, `GixCommitInfo`, `GixCommit`,
+`GixObjectId`, `GixObjectMetadata`, `RepositoryInfo`, and `GixException` +
+`GixErrorKind`.
 
 The managed layer closes the traps the POC exposed: managed `string` in and
 out, no generated resource escapes, results outlive the repository,
 `Dispose` is idempotent and guards further use, native errors become typed
 `GixException`. Reviewed 2026-08-24: no bugs found.
 
-For scale only, `gix` has 727 `pub fn` in `gix/src`. The eventual FFI surface
-will not map 1:1 to those functions because builders, iterators, callbacks,
-transactions and borrowed views need ABI-specific shapes. The target is full
-coverage.
+**Writes are now in scope.** This is no longer a read-only binding.
+`create_commit_object` and `create_commit_from_index` fail in ways a caller
+must act on - lock contention, non-fast-forward, missing parent, dirty
+index. Read paths tolerated a coarse error type; write paths do not. This is
+the main reason P0b has moved ahead of cursor work.
 
-Commits (managed layer landed after `d778a55e7`; check `git log`):
+For scale only, `gix` has 727 `pub fn` in `gix/src`. The eventual FFI
+surface will not map 1:1 to those, because builders, iterators, callbacks,
+transactions and borrowed views all need ABI-specific shapes. **The target
+is full coverage.**
+
+Early commits, for orientation only - use `git log` for the real history:
 
 | Commit | What |
 |---|---|
@@ -59,6 +77,7 @@ Commits (managed layer landed after `d778a55e7`; check `git log`):
 | `828a1e197` | GixSharp + Tests projects, byte-based paths |
 | `a200a90e1` | `head`, `rev_walk`, `commit_info` |
 | `d778a55e7` | `.gitattributes`, LF normalisation |
+
 
 ## Layout
 
@@ -68,21 +87,26 @@ gix-ffi/
   .cargo/config.toml    GITIGNORED, machine-local, required (see Traps)
   .gitattributes        forces LF; generator emits LF, autocrlf rewrites it
   .gitignore            *.sln ignored, GixSharp.slnx deliberately NOT
-  src/lib.rs            the Rust facade
+  src/                  the Rust facade, split across modules
   tests/generate_bindings.rs   generates Interop.cs (a test, not build.rs)
   bindings/
     GixSharp.slnx       solution, tests in a /tests/ folder
     Interop.cs          GENERATED, committed, namespace GixSharp
     GixSharp/
       GixSharp.csproj   packable class library, builds the cdylib
-      Managed/          HAND-WRITTEN managed layer
-    GixSharp.Tests/     TUnit - RepoTests (interop), ManagedRepositoryTests
+      Managed/          HAND-WRITTEN managed layer, partial GixRepository
+    GixSharp.Tests/     TUnit - interop-level and managed-level tests
 ```
+
+File names are deliberately omitted below the directory level: both `src/`
+and `Managed/` gain modules as coverage grows, and enumerating them here
+only creates drift. Read the directories.
 
 `gix-ffi` is a **nested independent cargo workspace** on purpose. As a
 gitoxide workspace member, `cargo test --workspace` would unify `gix`
 feature selection with `gitoxide-core`, which carries a `compile_error!`
 for `blocking-client` + `async-client` together.
+
 
 ## Design rules - decided, validated by execution
 
