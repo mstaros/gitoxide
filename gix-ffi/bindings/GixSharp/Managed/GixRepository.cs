@@ -31,7 +31,7 @@ public sealed record GixCommitInfo(
 /// <summary>
 /// Provides an idiomatic managed API over the generated gitoxide interop surface.
 /// </summary>
-public sealed class GixRepository : IDisposable
+public sealed partial class GixRepository : IDisposable
 {
     private static readonly UTF8Encoding PathEncoding =
         new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);

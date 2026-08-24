@@ -134,7 +134,7 @@ Implemented in the repository-core/discovery transaction that closes this issue.
 id: 2c6f1a02
 kind: issue
 severity: high
-status: open
+status: closed
 ```
 
 ### Scope
@@ -150,6 +150,17 @@ SHA-1 and repository-native object-format validation, missing/wrong-type objects
 ### Dependencies
 
 Repository core and discovery.
+
+### Resolution
+
+Implemented the complete mapped objects and commit-graph surface in the Rust FFI and idiomatic managed layer. Added object IDs/types/metadata, signatures, commits, sort flags, revision/tag peeling, history with exclusion and limits, tree lookup, index-backed and explicit commit creation, ordered parents, independent author/committer defaults, ref updates, allow-empty behavior, and ancestry (including equal IDs).
+
+Validation evidence before integration:
+
+- Rust: the full `gix-ffi` test suite passes, including 5 dedicated objects/commit-graph tests.
+- .NET: the complete `GixSharp.Tests` suite passes, 30/30.
+- Generated `Interop.cs` and the managed project build successfully.
+- Public managed signatures contain no generated Interoptopus resource types.
 
 ## Status parity
 

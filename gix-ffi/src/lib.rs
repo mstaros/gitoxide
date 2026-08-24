@@ -178,6 +178,193 @@ fn discover_repository(
     gix::ThreadSafeRepository::discover_opts(start_path, options, Default::default())
         .map_err(Into::into)
 }
+
+/// Object kind resolved from the object database.
+#[ffi]
+#[derive(Debug, Clone, Copy)]
+pub enum FfiObjectType {
+    Commit,
+    Tree,
+    Blob,
+    Tag,
+}
+
+/// Lightweight object metadata.
+#[ffi]
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectMetadata {
+    pub object_type: FfiObjectType,
+    pub size: u64,
+}
+
+/// A complete commit snapshot with owned fields.
+#[ffi]
+#[derive(Debug, Clone)]
+pub struct CommitRecord {
+    pub id: ffi::String,
+    pub message: ffi::Vec<u8>,
+    pub author_name: ffi::Vec<u8>,
+    pub author_email: ffi::Vec<u8>,
+    pub author_time_seconds: i64,
+    pub author_time_offset_seconds: i32,
+    pub committer_name: ffi::Vec<u8>,
+    pub committer_email: ffi::Vec<u8>,
+    pub committer_time_seconds: i64,
+    pub committer_time_offset_seconds: i32,
+    pub parent_ids: ffi::Vec<ffi::String>,
+}
+
+fn message(value: impl Into<String>) -> ffi::String {
+    ffi::String::from(value.into())
+}
+
+fn parse_id_for_repo(
+    repo: &gix::Repository,
+    value: &ffi::String,
+) -> Result<gix::ObjectId, GixError> {
+    let id = parse_id(value)?;
+    if id.kind() != repo.object_hash() {
+        return Err(GixError::InvalidId(message(format!(
+            "object id uses {:?}, but this repository uses {:?}",
+            id.kind(),
+            repo.object_hash()
+        ))));
+    }
+    Ok(id)
+}
+
+fn commit_from_revision<'repo>(
+    repo: &'repo gix::Repository,
+    revision: &ffi::String,
+) -> Result<gix::Commit<'repo>, GixError> {
+    let id = repo
+        .rev_parse_single(revision.as_str())
+        .map_err(|err| GixError::NotFound(chain_to_string(&err)))?;
+    let object = id
+        .object()
+        .map_err(|err| GixError::NotFound(chain_to_string(&err)))?;
+    object.peel_to_commit().map_err(|err| other(&err))
+}
+
+fn find_commit_checked<'repo>(
+    repo: &'repo gix::Repository,
+    id: gix::ObjectId,
+) -> Result<gix::Commit<'repo>, GixError> {
+    let header = repo
+        .find_header(id)
+        .map_err(|err| GixError::NotFound(chain_to_string(&err)))?;
+    if header.kind() != gix::objs::Kind::Commit {
+        return Err(GixError::Other(message(format!(
+            "object {id} is {:?}, not a commit",
+            header.kind()
+        ))));
+    }
+    repo.find_commit(id).map_err(|err| other(&err))
+}
+
+fn require_kind(
+    repo: &gix::Repository,
+    id: gix::ObjectId,
+    expected: gix::objs::Kind,
+) -> Result<(), GixError> {
+    let header = repo
+        .find_header(id)
+        .map_err(|err| GixError::NotFound(chain_to_string(&err)))?;
+    if header.kind() != expected {
+        return Err(GixError::Other(message(format!(
+            "object {id} is {:?}, not {expected:?}",
+            header.kind()
+        ))));
+    }
+    Ok(())
+}
+
+fn commit_record(commit: gix::Commit<'_>) -> Result<CommitRecord, GixError> {
+    let author = commit.author().map_err(|err| other(&err))?;
+    let committer = commit.committer().map_err(|err| other(&err))?;
+    let author_time = author.time().map_err(|err| other(&err))?;
+    let committer_time = committer.time().map_err(|err| other(&err))?;
+    let commit_message = commit.message_raw().map_err(|err| other(&err))?;
+    let parent_ids = commit
+        .parent_ids()
+        .map(|id| hex(id.as_ref()))
+        .collect::<Vec<_>>();
+
+    Ok(CommitRecord {
+        id: hex(commit.id.as_ref()),
+        message: ffi::Vec::from(commit_message.to_vec()),
+        author_name: ffi::Vec::from(author.name.to_vec()),
+        author_email: ffi::Vec::from(author.email.to_vec()),
+        author_time_seconds: author_time.seconds,
+        author_time_offset_seconds: author_time.offset,
+        committer_name: ffi::Vec::from(committer.name.to_vec()),
+        committer_email: ffi::Vec::from(committer.email.to_vec()),
+        committer_time_seconds: committer_time.seconds,
+        committer_time_offset_seconds: committer_time.offset,
+        parent_ids: ffi::Vec::from(parent_ids),
+    })
+}
+
+fn explicit_signature(
+    name: &[u8],
+    email: &[u8],
+    time_seconds: i64,
+    time_offset_seconds: i32,
+) -> Result<gix::actor::Signature, GixError> {
+    if name.is_empty() || email.is_empty() {
+        return Err(GixError::Other(message(
+            "signature name and email must not be empty",
+        )));
+    }
+    Ok(gix::actor::Signature {
+        name: name.to_vec().into(),
+        email: email.to_vec().into(),
+        time: gix::date::Time::new(time_seconds, time_offset_seconds),
+    })
+}
+
+fn configured_signature(
+    repo: &gix::Repository,
+    author: bool,
+) -> Result<gix::actor::Signature, GixError> {
+    let configured = if author {
+        repo.author()
+    } else {
+        repo.committer()
+    };
+    let role = if author { "author" } else { "committer" };
+    match configured {
+        None => Err(GixError::Config(message(format!(
+            "no {role} identity is configured"
+        )))),
+        Some(Err(err)) => Err(GixError::Config(chain_to_string(&err))),
+        Some(Ok(signature)) => signature.to_owned().map_err(|err| other(&err)),
+    }
+}
+
+fn tree_from_index(repo: &gix::Repository) -> Result<gix::ObjectId, GixError> {
+    let index = repo.index_or_empty().map_err(|err| other(&err))?;
+    let mut editor = repo
+        .edit_tree(gix::ObjectId::empty_tree(repo.object_hash()))
+        .map_err(|err| other(&err))?;
+
+    for entry in index.entries() {
+        if entry.stage() != gix::index::entry::Stage::Unconflicted {
+            return Err(GixError::Other(message(
+                "cannot create a commit while the index contains conflicts",
+            )));
+        }
+        let mode = entry.mode.to_tree_entry_mode().ok_or_else(|| {
+            GixError::Other(message("the index contains an unsupported entry mode"))
+        })?;
+        editor
+            .upsert(entry.path(&index), mode.kind(), entry.id)
+            .map_err(|err| other(&err))?;
+    }
+
+    editor.write().map(|id| id.detach()).map_err(|err| other(&err))
+}
+
 /// Where `HEAD` points, as a snapshot.
 ///
 /// A record rather than a service: `Head` is small and read once, so a
@@ -430,6 +617,377 @@ impl Repo {
             time_offset_seconds: time.offset,
             message: ffi::Vec::from(message),
         })
+    }
+
+    /// Resolve a revision, peel annotated tags, and return a complete commit.
+    pub fn lookup_commit(
+        &self,
+        revision: ffi::String,
+    ) -> ffi::Result<CommitRecord, GixError> {
+        let repo = self.inner.to_thread_local();
+        match commit_from_revision(&repo, &revision).and_then(commit_record) {
+            Ok(commit) => ffi::Ok(commit),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Return object kind and uncompressed size without loading the body.
+    pub fn object_metadata(
+        &self,
+        id: ffi::String,
+    ) -> ffi::Result<ObjectMetadata, GixError> {
+        let repo = self.inner.to_thread_local();
+        let id = match parse_id_for_repo(&repo, &id) {
+            Ok(id) => id,
+            Err(err) => return ffi::Err(err),
+        };
+        let header = match repo.find_header(id) {
+            Ok(header) => header,
+            Err(err) => return ffi::Err(GixError::NotFound(chain_to_string(&err))),
+        };
+        let object_type = match header.kind() {
+            gix::objs::Kind::Commit => FfiObjectType::Commit,
+            gix::objs::Kind::Tree => FfiObjectType::Tree,
+            gix::objs::Kind::Blob => FfiObjectType::Blob,
+            gix::objs::Kind::Tag => FfiObjectType::Tag,
+        };
+        ffi::Ok(ObjectMetadata {
+            object_type,
+            size: header.size(),
+        })
+    }
+
+    /// Walk commits with libgit2-compatible sort flags.
+    ///
+    /// Bit 0 is topological, bit 1 is commit time, and bit 2 reverses the
+    /// complete result. An empty exclusion means no hidden revision.
+    pub fn commit_history(
+        &self,
+        revision: ffi::String,
+        excluded_revision: ffi::String,
+        max_count: u64,
+        sort_flags: u32,
+    ) -> ffi::Result<ffi::Vec<ffi::String>, GixError> {
+        const TOPOLOGICAL: u32 = 1;
+        const TIME: u32 = 2;
+        const REVERSE: u32 = 4;
+        if sort_flags & !(TOPOLOGICAL | TIME | REVERSE) != 0 {
+            return ffi::Err(GixError::Other(message(
+                "unknown commit history sort flag",
+            )));
+        }
+        if max_count == 0 {
+            return ffi::Ok(ffi::Vec::from(Vec::new()));
+        }
+
+        let repo = self.inner.to_thread_local();
+        let tip = match commit_from_revision(&repo, &revision) {
+            Ok(commit) => commit.id,
+            Err(err) => return ffi::Err(err),
+        };
+        let excluded = if excluded_revision.as_str().is_empty() {
+            None
+        } else {
+            match commit_from_revision(&repo, &excluded_revision) {
+                Ok(commit) => Some(commit.id),
+                Err(err) => return ffi::Err(err),
+            }
+        };
+
+        let mut ids = Vec::<gix::ObjectId>::new();
+        if sort_flags & TOPOLOGICAL != 0 {
+            let mut builder =
+                gix::traverse::commit::topo::Builder::new(&repo.objects).with_tips([tip]);
+            if let Some(excluded) = excluded {
+                builder = builder.with_ends([excluded]);
+            }
+            let sorting = if sort_flags & TIME != 0 {
+                gix::traverse::commit::topo::Sorting::DateOrder
+            } else {
+                gix::traverse::commit::topo::Sorting::TopoOrder
+            };
+            let walk = match builder.sorting(sorting).build() {
+                Ok(walk) => walk,
+                Err(err) => return ffi::Err(other(&err)),
+            };
+            for item in walk {
+                match item {
+                    Ok(info) => ids.push(info.id),
+                    Err(err) => return ffi::Err(other(&err)),
+                }
+            }
+        } else {
+            let sorting = if sort_flags & TIME != 0 {
+                gix::revision::walk::Sorting::ByCommitTime(Default::default())
+            } else {
+                gix::revision::walk::Sorting::BreadthFirst
+            };
+            let mut platform = repo.rev_walk(Some(tip)).sorting(sorting);
+            if let Some(excluded) = excluded {
+                platform = platform.with_hidden([excluded]);
+            }
+            let walk = match platform.all() {
+                Ok(walk) => walk,
+                Err(err) => return ffi::Err(other(&err)),
+            };
+            for item in walk {
+                match item {
+                    Ok(info) => ids.push(info.id),
+                    Err(err) => return ffi::Err(other(&err)),
+                }
+            }
+        }
+
+        if sort_flags & REVERSE != 0 {
+            ids.reverse();
+        }
+        let limit = usize::try_from(max_count).unwrap_or(usize::MAX);
+        ids.truncate(limit);
+        ffi::Ok(ffi::Vec::from(
+            ids.into_iter().map(|id| hex(id.as_ref())).collect::<Vec<_>>(),
+        ))
+    }
+
+    /// Return the tree id referenced by a commit revision.
+    pub fn commit_tree_id(
+        &self,
+        revision: ffi::String,
+    ) -> ffi::Result<ffi::String, GixError> {
+        let repo = self.inner.to_thread_local();
+        let commit = match commit_from_revision(&repo, &revision) {
+            Ok(commit) => commit,
+            Err(err) => return ffi::Err(err),
+        };
+        match commit.tree_id() {
+            Ok(id) => ffi::Ok(hex(id.as_ref())),
+            Err(err) => ffi::Err(other(&err)),
+        }
+    }
+
+    /// Create a commit with explicit tree and ordered parents.
+    ///
+    /// Empty update-reference bytes write only the object. Each signature can
+    /// independently come from repository configuration or explicit fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_commit_object(
+        &self,
+        message_text: ffi::String,
+        tree_id: ffi::String,
+        parent_ids: ffi::Vec<ffi::String>,
+        update_reference: ffi::Slice<u8>,
+        author_is_explicit: bool,
+        author_name: ffi::Slice<u8>,
+        author_email: ffi::Slice<u8>,
+        author_time_seconds: i64,
+        author_time_offset_seconds: i32,
+        committer_is_explicit: bool,
+        committer_name: ffi::Slice<u8>,
+        committer_email: ffi::Slice<u8>,
+        committer_time_seconds: i64,
+        committer_time_offset_seconds: i32,
+    ) -> ffi::Result<ffi::String, GixError> {
+        let repo = self.inner.to_thread_local();
+        let tree_id = match parse_id_for_repo(&repo, &tree_id) {
+            Ok(id) => id,
+            Err(err) => return ffi::Err(err),
+        };
+        if let Err(err) = require_kind(&repo, tree_id, gix::objs::Kind::Tree) {
+            return ffi::Err(err);
+        }
+
+        let mut parents = Vec::with_capacity(parent_ids.len());
+        for parent in parent_ids.into_vec() {
+            let id = match parse_id_for_repo(&repo, &parent) {
+                Ok(id) => id,
+                Err(err) => return ffi::Err(err),
+            };
+            if let Err(err) = find_commit_checked(&repo, id) {
+                return ffi::Err(err);
+            }
+            parents.push(id);
+        }
+
+        let author = if author_is_explicit {
+            explicit_signature(
+                author_name.as_slice(),
+                author_email.as_slice(),
+                author_time_seconds,
+                author_time_offset_seconds,
+            )
+        } else {
+            configured_signature(&repo, true)
+        };
+        let author = match author {
+            Ok(signature) => signature,
+            Err(err) => return ffi::Err(err),
+        };
+        let committer = if committer_is_explicit {
+            explicit_signature(
+                committer_name.as_slice(),
+                committer_email.as_slice(),
+                committer_time_seconds,
+                committer_time_offset_seconds,
+            )
+        } else {
+            configured_signature(&repo, false)
+        };
+        let committer = match committer {
+            Ok(signature) => signature,
+            Err(err) => return ffi::Err(err),
+        };
+
+        let mut author_time = gix::date::parse::TimeBuf::default();
+        let mut committer_time = gix::date::parse::TimeBuf::default();
+        let author = author.to_ref(&mut author_time);
+        let committer = committer.to_ref(&mut committer_time);
+
+        if update_reference.as_slice().is_empty() {
+            match repo.new_commit_as(
+                committer,
+                author,
+                message_text.as_str(),
+                tree_id,
+                parents,
+            ) {
+                Ok(commit) => ffi::Ok(hex(commit.id.as_ref())),
+                Err(err) => ffi::Err(other(&err)),
+            }
+        } else {
+            let reference: gix::bstr::BString = update_reference.as_slice().to_vec().into();
+            match repo.commit_as(
+                committer,
+                author,
+                reference,
+                message_text.as_str(),
+                tree_id,
+                parents,
+            ) {
+                Ok(id) => ffi::Ok(hex(id.as_ref())),
+                Err(err) => ffi::Err(other(&err)),
+            }
+        }
+    }
+
+    /// Create a commit from the current index and atomically advance HEAD.
+    pub fn create_commit_from_index(
+        &self,
+        message_text: ffi::String,
+        has_explicit_identity: bool,
+        author_name: ffi::Slice<u8>,
+        author_email: ffi::Slice<u8>,
+        allow_empty: bool,
+    ) -> ffi::Result<ffi::String, GixError> {
+        let repo = self.inner.to_thread_local();
+        let tree_id = match tree_from_index(&repo) {
+            Ok(id) => id,
+            Err(err) => return ffi::Err(err),
+        };
+
+        let mut head = match repo.head() {
+            Ok(head) => head,
+            Err(err) => return ffi::Err(other(&err)),
+        };
+        let parent = match head.try_peel_to_id() {
+            Ok(parent) => parent.map(|id| id.detach()),
+            Err(err) => return ffi::Err(other(&err)),
+        };
+
+        if !allow_empty {
+            let unchanged = match parent {
+                Some(parent_id) => {
+                    let commit = match find_commit_checked(&repo, parent_id) {
+                        Ok(commit) => commit,
+                        Err(err) => return ffi::Err(err),
+                    };
+                    match commit.tree_id() {
+                        Ok(parent_tree) => parent_tree.detach() == tree_id,
+                        Err(err) => return ffi::Err(other(&err)),
+                    }
+                }
+                None => tree_id == gix::ObjectId::empty_tree(repo.object_hash()),
+            };
+            if unchanged {
+                return ffi::Err(GixError::Other(message(
+                    "refusing to create an empty commit",
+                )));
+            }
+        }
+
+        let parents = parent.into_iter().collect::<Vec<_>>();
+        if has_explicit_identity {
+            let now = gix::date::Time::now_local_or_utc();
+            let signature = match explicit_signature(
+                author_name.as_slice(),
+                author_email.as_slice(),
+                now.seconds,
+                now.offset,
+            ) {
+                Ok(signature) => signature,
+                Err(err) => return ffi::Err(err),
+            };
+            let mut author_time = gix::date::parse::TimeBuf::default();
+            let mut committer_time = gix::date::parse::TimeBuf::default();
+            match repo.commit_as(
+                signature.to_ref(&mut committer_time),
+                signature.to_ref(&mut author_time),
+                "HEAD",
+                message_text.as_str(),
+                tree_id,
+                parents,
+            ) {
+                Ok(id) => ffi::Ok(hex(id.as_ref())),
+                Err(err) => ffi::Err(other(&err)),
+            }
+        } else {
+            match repo.commit(
+                "HEAD",
+                message_text.as_str(),
+                tree_id,
+                parents,
+            ) {
+                Ok(id) => ffi::Ok(hex(id.as_ref())),
+                Err(err) => ffi::Err(other(&err)),
+            }
+        }
+    }
+
+    /// Return whether ancestor is reachable from descendant.
+    pub fn is_ancestor_of(
+        &self,
+        ancestor: ffi::String,
+        descendant: ffi::String,
+    ) -> ffi::Result<bool, GixError> {
+        let repo = self.inner.to_thread_local();
+        let ancestor = match parse_id_for_repo(&repo, &ancestor) {
+            Ok(id) => id,
+            Err(err) => return ffi::Err(err),
+        };
+        let descendant = match parse_id_for_repo(&repo, &descendant) {
+            Ok(id) => id,
+            Err(err) => return ffi::Err(err),
+        };
+        if let Err(err) = find_commit_checked(&repo, ancestor) {
+            return ffi::Err(err);
+        }
+        if let Err(err) = find_commit_checked(&repo, descendant) {
+            return ffi::Err(err);
+        }
+        if ancestor == descendant {
+            return ffi::Ok(true);
+        }
+
+        let walk = match repo.rev_walk(Some(descendant)).all() {
+            Ok(walk) => walk,
+            Err(err) => return ffi::Err(other(&err)),
+        };
+        for item in walk {
+            match item {
+                Ok(info) if info.id == ancestor => return ffi::Ok(true),
+                Ok(_) => {}
+                Err(err) => return ffi::Err(other(&err)),
+            }
+        }
+        ffi::Ok(false)
     }
 }
 
