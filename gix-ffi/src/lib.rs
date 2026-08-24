@@ -25,6 +25,9 @@ use interoptopus::ffi;
 use interoptopus::inventory::RustInventory;
 use interoptopus::{builtins_string, builtins_vec, guard, service};
 
+mod status;
+pub use status::StatusRecord;
+
 /// The single error type crossing the boundary.
 ///
 /// Deliberately coarse for now. `gix` error enums are mostly *struct*
@@ -951,6 +954,22 @@ impl Repo {
         }
     }
 
+    /// Return repository status with LibGit2.Native-compatible numeric flags.
+    ///
+    /// `pathspecs` is a NUL-separated list of raw Git pathspec bytes.
+    pub fn status(
+        &self,
+        show: u32,
+        flags: u32,
+        pathspecs: ffi::Slice<u8>,
+    ) -> ffi::Result<ffi::Vec<StatusRecord>, GixError> {
+        let repo = self.inner.to_thread_local();
+        match status::collect(&repo, show, flags, pathspecs.as_slice()) {
+            Ok(records) => ffi::Ok(ffi::Vec::from(records)),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
     /// Return whether ancestor is reachable from descendant.
     pub fn is_ancestor_of(
         &self,
@@ -1010,6 +1029,7 @@ pub fn ffi_inventory() -> RustInventory {
         .register(builtins_string!())
         .register(builtins_vec!(u8))
         .register(builtins_vec!(ffi::String))
+        .register(builtins_vec!(StatusRecord))
         .register(service!(Repo))
         .validate()
 }

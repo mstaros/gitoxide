@@ -168,7 +168,7 @@ Validation evidence before integration:
 id: 2c6f1a03
 kind: issue
 severity: high
-status: open
+status: closed
 ```
 
 ### Scope
@@ -182,6 +182,23 @@ Index-only, worktree-only, and combined views cover staged, unstaged, untracked,
 ### Dependencies
 
 Repository core and discovery.
+
+### Resolution
+
+Implemented the complete mapped status surface in the Rust FFI and idiomatic managed layer. The native boundary returns LibGit2.Native-compatible status bits with raw repository-relative path bytes; the managed API preserves those bytes while exposing decoded paths, staged/worktree convenience properties, default CSharpMpc-compatible options, and explicit pathspecs.
+
+All 16 status option flags have defined handling, including untracked, ignored, unmodified, submodule exclusion, both recursion modes, literal pathspec matching, both rename directions, case sorting, rewrite/copy tracking, index refresh/writeback policy, and unreadable entries. Combined, index-only, and worktree-only results aggregate or filter staged/worktree additions, modifications, deletions, renames, type changes, conflicts, ignored paths, and untracked paths.
+
+Validation evidence before integration:
+
+- Rust: the full `gix-ffi` suite passes, including 6 dedicated status tests and the binding generator.
+- .NET: 8/8 dedicated status tests and the complete 38/38 `GixSharp.Tests` suite pass against the real native DLL.
+- Roslyn/MSBuild reports zero diagnostics and generated `Interop.cs` builds without hand edits.
+- Tests cover the exact option combinations used by all 11 current CSharpMpc status call sites.
+- Raw path bytes round-trip through Rust/FFI; non-UTF-8 paths are covered on platforms that permit them.
+- Public managed signatures contain no generated Interoptopus resource types.
+
+Implemented and validated with OpenAI Codex assistance.
 
 ## Index and conflicts parity
 
