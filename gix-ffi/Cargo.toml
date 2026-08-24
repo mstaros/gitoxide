@@ -1,0 +1,44 @@
+[package]
+name = "gix-ffi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+# Independent workspace on purpose. This crate must NOT join the gitoxide
+# workspace: doing so would unify `gix` feature selection with gitoxide-core
+# and the gix CLI, which carry a compile_error! for
+# blocking-client + async-client together.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Default features stay ON: this is the exact set validated by the
+# `cargo +nightly rustdoc --output-format json` run. `parallel` is not
+# optional - without it `gix::Repository` is not `Send`.
+gix = { path = "../gix", features = [
+    "parallel",
+    "attributes",
+    "revision",
+    "blame",
+    "merge",
+    "status",
+    "dirwalk",
+    "index",
+    "worktree-mutation",
+    "blocking-network-client",
+] }
+interoptopus = "0.16.4"
+
+[dev-dependencies]
+interoptopus_csharp = "0.16.4"
+
+# To build against a local interoptopus checkout, put `[patch.crates-io]` in a
+# machine-local `.cargo/config.toml` - NOT in this file. Absolute paths in a
+# committed manifest break every other checkout, worktree, and CI run.
+#
+# Beware: a registry crate and a local checkout can carry the SAME version
+# number while differing in content, and nothing in the build output says which
+# one you got. Verify before assuming local generator edits are in effect.

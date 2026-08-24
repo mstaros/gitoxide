@@ -1,3 +1,6 @@
 /target
+/bindings/**/obj
+/bindings/**/bin
 *.sln
-
+*.sln.sqlite
+.vs/
