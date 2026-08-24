@@ -368,6 +368,10 @@ public sealed partial class GixRepository : IDisposable
                 (GixErrorKind.InvalidId, error.AsInvalidId().String),
             { IsNotFound: true } =>
                 (GixErrorKind.NotFound, error.AsNotFound().String),
+            { IsInvalidReference: true } =>
+                (GixErrorKind.InvalidReference, error.AsInvalidReference().String),
+            { IsReferenceConflict: true } =>
+                (GixErrorKind.ReferenceConflict, error.AsReferenceConflict().String),
             { IsOther: true } =>
                 (GixErrorKind.Other, error.AsOther().String),
             _ =>

@@ -26,8 +26,10 @@ use interoptopus::inventory::RustInventory;
 use interoptopus::{builtins_string, builtins_vec, guard, service};
 
 mod index;
+mod references;
 mod status;
 pub use index::IndexEntryRecord;
+pub use references::{BranchRecord, OptionalObjectId, ReferenceLockLease, ReferenceRecord};
 pub use status::StatusRecord;
 
 /// The single error type crossing the boundary.
@@ -59,6 +61,10 @@ pub enum GixError {
     InvalidId(ffi::String),
     /// A reference or object does not exist.
     NotFound(ffi::String),
+    /// A reference name is not valid for the requested operation.
+    InvalidReference(ffi::String),
+    /// A reference edit or lock lost a race with another writer.
+    ReferenceConflict(ffi::String),
     /// Anything not yet categorised.
     Other(ffi::String),
 }
@@ -1088,6 +1094,123 @@ impl Repo {
         }
         ffi::Ok(false)
     }
+
+    /// Enumerate references, optionally filtered by a raw-byte glob.
+    ///
+    /// An empty glob enumerates every ordinary reference.
+    pub fn references(
+        &self,
+        glob: ffi::Slice<u8>,
+    ) -> ffi::Result<ffi::Vec<ReferenceRecord>, GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::references(&repo, glob.as_slice()) {
+            Ok(records) => ffi::Ok(ffi::Vec::from(records)),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Enumerate local and/or remote-tracking branches.
+    pub fn branches(&self, filter: u32) -> ffi::Result<ffi::Vec<BranchRecord>, GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::branches(&repo, filter) {
+            Ok(records) => ffi::Ok(ffi::Vec::from(records)),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Create or replace a local branch at a commit-resolving revision.
+    pub fn create_branch(
+        &self,
+        name: ffi::Slice<u8>,
+        target_revision: ffi::String,
+        force: bool,
+    ) -> ffi::Result<BranchRecord, GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::create_branch(&repo, name.as_slice(), &target_revision, force) {
+            Ok(record) => ffi::Ok(record),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Delete a local or remote-tracking branch.
+    pub fn delete_branch(
+        &self,
+        name: ffi::Slice<u8>,
+        remote: bool,
+    ) -> ffi::Result<(), GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::delete_branch(&repo, name.as_slice(), remote) {
+            Ok(()) => ffi::Ok(()),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Point HEAD symbolically at a reference without checking out files.
+    pub fn set_head(&self, branch_name: ffi::Slice<u8>) -> ffi::Result<(), GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::set_head(&repo, branch_name.as_slice()) {
+            Ok(()) => ffi::Ok(()),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Resolve an exact reference through symbolic links to its first object id.
+    pub fn try_get_reference_target(
+        &self,
+        name: ffi::Slice<u8>,
+    ) -> ffi::Result<OptionalObjectId, GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::try_get_reference_target(&repo, name.as_slice()) {
+            Ok(result) => ffi::Ok(result),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Create an exact direct reference only when it is absent.
+    pub fn try_create_reference(
+        &self,
+        name: ffi::Slice<u8>,
+        target: ffi::String,
+    ) -> ffi::Result<bool, GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::try_create_reference(&repo, name.as_slice(), &target) {
+            Ok(created) => ffi::Ok(created),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Atomically replace an exact direct reference when expected-old matches.
+    pub fn compare_exchange_reference(
+        &self,
+        name: ffi::Slice<u8>,
+        target: ffi::String,
+        expected: ffi::String,
+    ) -> ffi::Result<bool, GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::compare_exchange_reference(
+            &repo,
+            name.as_slice(),
+            &target,
+            &expected,
+        ) {
+            Ok(updated) => ffi::Ok(updated),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Delete an exact direct reference when expected-old matches.
+    pub fn try_delete_reference(
+        &self,
+        name: ffi::Slice<u8>,
+        expected: ffi::String,
+    ) -> ffi::Result<bool, GixError> {
+        let repo = self.inner.to_thread_local();
+        match references::try_delete_reference(&repo, name.as_slice(), &expected) {
+            Ok(deleted) => ffi::Ok(deleted),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
 }
 
 /// The exported surface.
@@ -1109,8 +1232,11 @@ pub fn ffi_inventory() -> RustInventory {
         .register(builtins_string!())
         .register(builtins_vec!(u8))
         .register(builtins_vec!(ffi::String))
+        .register(builtins_vec!(ReferenceRecord))
+        .register(builtins_vec!(BranchRecord))
         .register(builtins_vec!(IndexEntryRecord))
         .register(builtins_vec!(StatusRecord))
+        .register(service!(ReferenceLockLease))
         .register(service!(Repo))
         .validate()
 }

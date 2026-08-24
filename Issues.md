@@ -242,7 +242,7 @@ Implemented and validated with OpenAI Codex assistance.
 id: 2c6f1a05
 kind: issue
 severity: high
-status: open
+status: closed
 ```
 
 ### Scope
@@ -256,6 +256,18 @@ Direct and symbolic refs, packed refs, local/remote branches, invalid names, exp
 ### Dependencies
 
 Repository core and discovery; object identifiers from objects and commit graph.
+
+### Resolution
+
+Closed the bounded reference/branch compatibility slice described above. This does not claim complete gitoxide reference-domain coverage; broader public `gix` coverage remains separately tracked after the boundary-contract work.
+
+- Rust exposes deterministic direct, symbolic, packed, local, and remote-tracking reference enumeration; branch create/force/delete and HEAD changes; exact create, compare/exchange, and delete operations; and an owned multi-reference lock service.
+- Reference names remain byte-preserving at the boundary, object IDs remain validated managed values, and invalid names, missing objects, and reference contention translate to distinct managed error kinds.
+- Multi-reference locks validate, ordinal-sort, deduplicate, roll back partial acquisition, block cooperative edits, can outlive the repository wrapper, and release through idempotent managed disposal.
+- Four focused Rust integration tests and five consumer-shaped TUnit tests cover the mapped behavior without invoking the Git executable. The complete Rust suite, reproducible binding generation, zero-diagnostic managed build, and 50/50 TUnit suite pass against the real native DLL.
+- Public managed signatures expose only managed records, value types, collections, and `IDisposable`; generated Interoptopus resources do not escape.
+
+Implemented and validated with OpenAI Codex assistance.
 
 ## Diff and tree changes parity
 

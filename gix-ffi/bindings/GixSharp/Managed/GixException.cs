@@ -9,6 +9,8 @@ public enum GixErrorKind
     InvalidPath,
     InvalidId,
     NotFound,
+    InvalidReference,
+    ReferenceConflict,
     Other,
 }
 
