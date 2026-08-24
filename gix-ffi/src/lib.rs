@@ -90,6 +90,50 @@ impl From<gix::open::Error> for GixError {
     }
 }
 
+impl From<gix::discover::Error> for GixError {
+    fn from(err: gix::discover::Error) -> Self {
+        let msg = chain_to_string(&err);
+        match err {
+            gix::discover::Error::Open(err) => err.into(),
+            gix::discover::Error::Discover(err) => match err {
+                gix::discover::upwards::Error::CurrentDir(_)
+                | gix::discover::upwards::Error::CheckTrust { .. } => Self::Io(msg),
+                gix::discover::upwards::Error::InvalidInput { .. } => Self::InvalidPath(msg),
+                gix::discover::upwards::Error::InaccessibleDirectory { .. } => Self::Io(msg),
+                gix::discover::upwards::Error::NoGitRepository { .. }
+                | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. }
+                | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
+                | gix::discover::upwards::Error::NoMatchingCeilingDir
+                | gix::discover::upwards::Error::NoTrustedGitRepository { .. } => {
+                    Self::NotARepository(msg)
+                }
+            },
+        }
+    }
+}
+
+impl From<gix::init::Error> for GixError {
+    fn from(err: gix::init::Error) -> Self {
+        let msg = chain_to_string(&err);
+        match err {
+            gix::init::Error::CurrentDir(_) => Self::Io(msg),
+            gix::init::Error::Open(err) => err.into(),
+            gix::init::Error::Init(err) => match err {
+                gix::create::Error::CurrentDir(_)
+                | gix::create::Error::IoOpen { .. }
+                | gix::create::Error::IoWrite { .. }
+                | gix::create::Error::CreateDirectory { .. } => Self::Io(msg),
+                gix::create::Error::Span(_) | gix::create::Error::ConfigValue(_) => {
+                    Self::Config(msg)
+                }
+                gix::create::Error::DirectoryExists { .. }
+                | gix::create::Error::DirectoryNotEmpty { .. } => Self::Other(msg),
+            },
+            gix::init::Error::InvalidBranchName { .. } => Self::Config(msg),
+            gix::init::Error::EditHeadForDefaultBranch(_) => Self::Other(msg),
+        }
+    }
+}
 /// Format an object id as lowercase hex.
 fn hex(id: &gix::hash::oid) -> ffi::String {
     ffi::String::from(id.to_string())
@@ -101,6 +145,39 @@ fn parse_id(value: &ffi::String) -> Result<gix::ObjectId, GixError> {
         .map_err(|err| GixError::InvalidId(chain_to_string(&err)))
 }
 
+fn path_from_bytes(bytes: &[u8]) -> Result<std::path::PathBuf, GixError> {
+    gix::path::try_from_byte_slice(bytes)
+        .map(std::path::Path::to_owned)
+        .map_err(|err| GixError::InvalidPath(chain_to_string(&err)))
+}
+
+fn path_bytes(path: &std::path::Path) -> ffi::Vec<u8> {
+    let bytes = gix::path::into_bstr(path.to_owned()).into_owned();
+    ffi::Vec::from(Vec::from(bytes))
+}
+
+fn discover_repository(
+    start_path: &[u8],
+    across_file_systems: bool,
+    ceiling_directories: &[u8],
+) -> Result<gix::ThreadSafeRepository, GixError> {
+    let start_path = path_from_bytes(start_path)?;
+    let mut options = gix::discover::upwards::Options {
+        cross_fs: across_file_systems,
+        ..Default::default()
+    };
+
+    if !ceiling_directories.is_empty() {
+        let path_list = path_from_bytes(ceiling_directories)?;
+        options.ceiling_dirs = std::env::split_paths(path_list.as_os_str()).collect();
+        // libgit2 treats non-matching ceilings as an ordinary unsuccessful
+        // search instead of an invalid-options error.
+        options.match_ceiling_dir_or_error = false;
+    }
+
+    gix::ThreadSafeRepository::discover_opts(start_path, options, Default::default())
+        .map_err(Into::into)
+}
 /// Where `HEAD` points, as a snapshot.
 ///
 /// A record rather than a service: `Head` is small and read once, so a
@@ -137,6 +214,23 @@ pub struct CommitInfo {
     pub message: ffi::Vec<u8>,
 }
 
+/// Stable repository location metadata, returned as owned data.
+#[ffi]
+#[derive(Debug, Clone)]
+pub struct RepositoryInfo {
+    /// Repository-private git directory.
+    pub repository_path: ffi::Vec<u8>,
+    /// Worktree directory, empty when the repository is bare.
+    pub working_directory: ffi::Vec<u8>,
+    /// Whether `working_directory` is present.
+    pub has_working_directory: bool,
+    /// Common git directory shared by linked worktrees.
+    pub common_directory: ffi::Vec<u8>,
+    /// Whether the repository has no worktree.
+    pub is_bare: bool,
+    /// Whether this handle belongs to a linked worktree.
+    pub is_worktree: bool,
+}
 /// An open repository.
 ///
 /// Stores the `Sync`-capable form; each method derives a thread-local
@@ -148,15 +242,32 @@ pub struct Repo {
 
 #[ffi]
 impl Repo {
+    /// Initialize a repository at `path`.
+    pub fn create(path: ffi::Slice<u8>, bare: bool) -> ffi::Result<Self, GixError> {
+        let path = match path_from_bytes(path.as_slice()) {
+            Ok(path) => path,
+            Err(err) => return ffi::Err(err),
+        };
+        let kind = if bare {
+            gix::create::Kind::Bare
+        } else {
+            gix::create::Kind::WithWorktree
+        };
+        match gix::ThreadSafeRepository::init(path, kind, Default::default()) {
+            Ok(inner) => ffi::Ok(Self { inner }),
+            Err(err) => ffi::Err(err.into()),
+        }
+    }
+
     /// Open an existing repository at `path`.
     ///
     /// `path` is raw bytes in the platform's native encoding, not UTF-8.
     /// On Windows it must still round-trip through UTF-16, hence the
     /// fallible conversion.
     pub fn open(path: ffi::Slice<u8>) -> ffi::Result<Self, GixError> {
-        let path = match gix::path::try_from_byte_slice(path.as_slice()) {
+        let path = match path_from_bytes(path.as_slice()) {
             Ok(path) => path,
-            Err(err) => return ffi::Err(GixError::InvalidPath(chain_to_string(&err))),
+            Err(err) => return ffi::Err(err),
         };
         match gix::ThreadSafeRepository::open(path) {
             Ok(inner) => ffi::Ok(Self { inner }),
@@ -164,6 +275,44 @@ impl Repo {
         }
     }
 
+    /// Discover and open a repository upwards from `start_path`.
+    ///
+    /// `ceiling_directories` is a platform path-list string. An empty slice
+    /// means no ceiling. If `across_file_systems` is false, discovery stops
+    /// at a filesystem boundary on platforms that expose device ids.
+    pub fn discover(
+        start_path: ffi::Slice<u8>,
+        across_file_systems: bool,
+        ceiling_directories: ffi::Slice<u8>,
+    ) -> ffi::Result<Self, GixError> {
+        match discover_repository(
+            start_path.as_slice(),
+            across_file_systems,
+            ceiling_directories.as_slice(),
+        ) {
+            Ok(inner) => ffi::Ok(Self { inner }),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Stable repository location metadata.
+    pub fn info(&self) -> RepositoryInfo {
+        let repo = self.inner.to_thread_local();
+        let repository_path = repo.git_dir();
+        let common_directory = repo.common_dir();
+        let working_directory = repo.workdir();
+
+        RepositoryInfo {
+            repository_path: path_bytes(repository_path),
+            working_directory: working_directory
+                .map(path_bytes)
+                .unwrap_or_else(|| ffi::Vec::from(Vec::new())),
+            has_working_directory: working_directory.is_some(),
+            common_directory: path_bytes(common_directory),
+            is_bare: repo.is_bare(),
+            is_worktree: common_directory != repository_path,
+        }
+    }
     /// Absolute path of the `.git` directory, as raw platform bytes.
     pub fn git_dir(&self) -> ffi::Result<ffi::Vec<u8>, GixError> {
         let repo = self.inner.to_thread_local();

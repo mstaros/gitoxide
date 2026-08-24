@@ -149,6 +149,7 @@ public sealed class ManagedRepositoryTests
             typeof(Repo),
             typeof(HeadInfo),
             typeof(CommitInfo),
+            typeof(RepositoryInfo),
             typeof(GixError),
             typeof(Utf8String),
             typeof(VecByte),

@@ -102,30 +102,37 @@ Zero current call sites do not remove a module from the parity target.
 
 ```issue
 id: 2c6f1a01
-kind: feature
+kind: issue
 severity: high
-status: open
+status: closed
 ```
 
 ### Scope
 
 Complete the repository lifecycle and discovery surface: `Init`, `Open`, `OpenDiscovered`, `FindWorktreeRoot`, `Discover`, `TryDiscover`, `RepositoryPath`, `WorkingDirectory`, `CommonDirectory`, `IsBare`, `IsWorktree`, `Head`, and disposal/lifetime behavior.
 
-The existing POC already supplies `Open`, `GitDir`, `IsBare`, and `Head`; this issue closes the remaining parity and normalizes their public managed shape.
+The existing POC already supplied `Open`, `GitDir`, `IsBare`, and `Head`; this issue closes the remaining parity and normalizes their public managed shape.
 
 ### Acceptance
 
 Bare repositories, normal worktrees, linked worktrees, nested discovery, nonexistent paths, unborn HEAD, and detached HEAD are covered. Discovery returns owned path bytes in Rust and platform-correct strings in managed code.
 
-### Order
+### Resolution
 
-First. It is the prerequisite for all repository-scoped modules.
+Implemented in the repository-core/discovery transaction that closes this issue.
+
+- Rust adds repository initialization, configurable upward discovery, owned `RepositoryInfo`, common/worktree/private paths, bare state, and linked-worktree state.
+- Generated `Interop.cs` exposes `Repo.Create`, `Repo.Discover`, `Repo.Info`, and `RepositoryInfo`; it remains generated and unedited by hand.
+- `GixRepository` exposes idiomatic managed lifecycle, discovery, path, and repository-state APIs without generated resources in public signatures.
+- Tests cover normal and bare initialization, unborn and detached HEAD, linked worktrees, nested discovery, ceiling directories, cross-filesystem option plumbing, missing repositories, and post-disposal guards.
+- `cargo test` passes the binding generator plus 3 repository-core integration tests.
+- Roslyn/MSBuild reports zero diagnostics and 22/22 TUnit tests pass against the real native DLL.
 
 ## Objects and commit graph parity
 
 ```issue
 id: 2c6f1a02
-kind: feature
+kind: issue
 severity: high
 status: open
 ```
@@ -148,7 +155,7 @@ Repository core and discovery.
 
 ```issue
 id: 2c6f1a03
-kind: feature
+kind: issue
 severity: high
 status: open
 ```
@@ -169,7 +176,7 @@ Repository core and discovery.
 
 ```issue
 id: 2c6f1a04
-kind: feature
+kind: issue
 severity: high
 status: open
 ```
@@ -190,7 +197,7 @@ Repository core and discovery; object identifiers from objects and commit graph.
 
 ```issue
 id: 2c6f1a05
-kind: feature
+kind: issue
 severity: high
 status: open
 ```
@@ -211,7 +218,7 @@ Repository core and discovery; object identifiers from objects and commit graph.
 
 ```issue
 id: 2c6f1a06
-kind: feature
+kind: issue
 severity: high
 status: open
 ```
@@ -232,7 +239,7 @@ Repository core and discovery; objects and commit graph; index and conflicts.
 
 ```issue
 id: 2c6f1a07
-kind: feature
+kind: issue
 severity: medium
 status: open
 ```
@@ -253,7 +260,7 @@ Repository core and discovery.
 
 ```issue
 id: 2c6f1a08
-kind: feature
+kind: issue
 severity: high
 status: open
 ```
@@ -274,7 +281,7 @@ Objects and commit graph; index and conflicts; references and branches; diff and
 
 ```issue
 id: 2c6f1a09
-kind: feature
+kind: issue
 severity: medium
 status: open
 ```
@@ -295,7 +302,7 @@ Repository core and discovery; configuration.
 
 ```issue
 id: 2c6f1a0a
-kind: feature
+kind: issue
 severity: medium
 status: open
 ```
@@ -316,7 +323,7 @@ Repository core and discovery; references and branches; guarded checkout behavio
 
 ```issue
 id: 2c6f1a0b
-kind: feature
+kind: issue
 severity: medium
 status: open
 ```
@@ -337,7 +344,7 @@ Repository core and discovery.
 
 ```issue
 id: 2c6f1a0c
-kind: feature
+kind: issue
 severity: medium
 status: open
 ```
@@ -358,7 +365,7 @@ Objects and commit graph; references and branches.
 
 ```issue
 id: 2c6f1a0d
-kind: feature
+kind: issue
 severity: medium
 status: open
 ```
@@ -379,7 +386,7 @@ Repository core and discovery; index and conflicts; guarded checkout behavior.
 
 ```issue
 id: 2c6f1a0e
-kind: feature
+kind: issue
 severity: high
 status: open
 ```
