@@ -1,0 +1,8 @@
+# Generated and hand-written sources here are emitted with LF by the Rust
+# generator. Without this, core.autocrlf rewrites the working copy to CRLF and
+# every regeneration shows as "modified" with an empty diff, which blocks
+# merges and hides real changes.
+*.cs text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.csproj text eol=lf
