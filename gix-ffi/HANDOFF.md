@@ -110,11 +110,12 @@ for `blocking-client` + `async-client` together.
    implementation is POC/legacy and must not be copied as guidance for new
    iterator APIs. Eager materialisation remains acceptable only when a result
    is deliberately known to be small and bounded. General iteration uses the
-   streaming architecture below.
-7. **The coarse error ABI is POC-only** (`GixError` -> `GixErrorKind`).
-   Full coverage requires a stable error taxonomy before breadth resumes;
-   retrofitting it after consumers depend on coarse exceptions would make
-   every later correction more expensive and potentially breaking.
+   boundary architecture below.
+7. **One public `GixException`; the current error taxonomy is POC-only.**
+   Do not replace it with exception subclasses. Settle the stable error
+   envelope before cursor/error semantics or breadth: small semantic `Kind`,
+   extensible machine-readable `Code`, orthogonal retryability, diagnostic
+   message, and structured detail only where callers need recovery operands.
 8. **Nothing generated escapes the managed layer.** Enforced by
    `ManagedRepositorySignatures_DoNotExposeGeneratedResources`, a reflection
    test. Keep that test passing as the surface grows.
@@ -200,12 +201,13 @@ contention remains after streaming is in place, an interlocked call-counter
 (the pattern uniffi's generated wrapper uses) keeps dispose safety without
 serialising unrelated calls.
 
-## P0 - streaming architecture
+## P0 - boundary contracts before breadth
 
-Full coverage needs one coherent streaming **lifecycle**, but byte streams and
-structured record streams should not be forced through the same transfer
-primitive. Settle the byte-stream data plane first, then freeze the cursor
-contract against those lifecycle constraints.
+Full coverage now has three high-coupling boundary decisions that must be
+settled before broad surface expansion: bulk-byte transfer, the error contract,
+and structured cursors. Resolve them in that order. Byte streaming constrains
+the shared stream lifecycle; the error contract then has to exist before cursor
+item/terminal error semantics are frozen.
 
 ### P0a - byte streams first
 
@@ -261,12 +263,83 @@ peak managed memory, allocations, copies, call count and cancellation/disposal
 behaviour. The managed contract must not encode today's ODB materialisation if
 that implementation can improve later.
 
-### P0b - structured cursors second
+### P0b - error ABI before cursors
+
+The coarse seven-value `GixError` / `GixErrorKind` model is POC-only and is now
+the most urgent compatibility decision after byte streaming. Deferring it is
+uniquely expensive because every existing and future operation shares the same
+public `GixException` contract. Stateful resources and callbacks can mostly be
+added when their APIs arrive; changing error semantics later breaks filters and
+switches across the whole managed surface.
+
+The current surface is already sufficient to design against. In particular,
+write paths expose distinctions that callers must act on rather than recover
+from prose. Current `Other` mappings include wrong object type, invalid explicit
+signature, conflicted index, empty-commit refusal, reference lock contention,
+reference compare-and-swap races and object/write failures. Two corrections to
+keep precise:
+
+- a missing parent object is already classified as `NotFound`;
+- `create_commit_from_index` currently rejects an index containing conflicts,
+  not a merely dirty worktree/index.
+
+`gix-ref` already preserves the important ref-update distinctions internally:
+`LockAcquire`, `MustExist`, `MustNotExist` and `ReferenceOutOfDate`, including
+reference name and expected/actual targets. The facade must stop flattening
+these into `Other`.
+
+The accepted error direction is:
+
+- **Keep one public `GixException` class.** Do not create an exception subclass
+  hierarchy. Existing `catch (GixException)` code should remain valid.
+- **Replace the payload-enum error ABI with one FFI-safe error envelope/record.**
+  `ffi::Result<T, E>` already supplies the discriminated `Err(E)` arm, so `E`
+  can be a composite. This avoids trying to mirror gix's struct-heavy errors
+  through Interoptopus payload enums, which support only single-field tuple
+  variants.
+- **`Kind` is a small semantic/action category, not a mirror of concrete gix
+  variants.** The stable semantic buckets need to cover validation/input,
+  not-found, failed precondition/state, concurrency conflict, busy/locked,
+  configuration, I/O, corruption, unsupported, authentication/transport,
+  cancellation and internal/unknown. Exact public enum spelling should be
+  frozen once against representative mappings, but the categories themselves
+  are the intended level of abstraction.
+- **`Code` carries the precise machine-readable reason** as an extensible ASCII
+  identifier rather than another closed enum. Adding a new specific code must
+  not require changing the error record layout. Examples from the current
+  surface include invalid-object-id, object-type-mismatch, index-conflicted,
+  empty-commit-disallowed, reference-out-of-date and lock-unavailable.
+- **Retryability is orthogonal to `Kind`.** Expose it as a flag/property rather
+  than a category. This matches the direction in `gix-error`, which separately
+  exposes `can_retry()` alongside validation/not-found/corruption
+  classification.
+- **The message remains diagnostic only.** Preserve the full display/source
+  chain for humans and logs, but no managed control flow may parse message
+  text.
+- **Use structured detail only where recovery needs operands.** Ref-update
+  conflicts need the reference name and expected/actual targets; object-kind
+  mismatch needs object id and expected/actual kind. Do not create a payload
+  type for every error. Generated detail types remain internal; public managed
+  detail is typed and must continue to satisfy rule 8.
+- **Centralise classification.** Important gix error enums get explicit,
+  exhaustive matches so newly added upstream variants force a decision at
+  compile time. A generic lower layer may recognise `std::io::Error` and
+  `gix-error` semantic markers such as validation, not-found, corruption and
+  retryability. Never classify by matching `Display` strings.
+
+This is the one intentional taxonomy break to make before breadth. The managed
+migration should preserve `GixException.Operation` and diagnostic message while
+replacing the current coarse `Kind` semantics and adding `Code`, retryability
+and optional typed detail. `guard!(ffi_inventory)` catches managed/native ABI
+mismatch but does not substitute for this compatibility policy.
+
+### P0c - structured cursors third
 
 Structured record streams include rev-walk, full-repo dirwalk, status,
 references/reflogs, tree changes, object enumeration, parser tokens, pack
-indexes and similar APIs. After P0a establishes the shared stream lifecycle,
-freeze the record-stream contract around:
+indexes and similar APIs. After P0a establishes the shared stream lifecycle and
+P0b establishes the error envelope used for yielded and terminal errors, freeze
+the record-stream contract around:
 
 - managed pull enumeration (`IEnumerable<T>` / `IEnumerator<T>` semantics)
 - bounded batches across the FFI boundary to amortise native-call overhead
@@ -290,49 +363,65 @@ implementation. `rev_walk` and reference iterators borrow repositories;
 callback-driven but `Change::detach()` produces an owned change. They can all
 adapt to the same managed consumption model.
 
+Cursor introduction does not need to break the existing managed
+`RevWalk(string, int) -> IReadOnlyList<string>` convenience API. Keep that
+method as a materialising wrapper over the new streaming surface while the
+native eager implementation is retired. New lazy enumeration is therefore
+additive even though eager native iteration stops being the architectural
+precedent.
+
 The detached-payload rule above must gain an automated test/check analogous to
 the existing managed reflection invariant. The handoff intentionally does not
 prescribe the mechanism yet; the requirement is that violations become a
 build/test failure rather than a review convention.
 
 Do **not** add a generic stream/cursor abstraction to Interoptopus yet. Prove
-the byte reader first, then the cursor contract in `gix-ffi` with at least one
-repo-borrowing stream (`rev_walk`) and one naturally streaming workload
-(`dirwalk` or `status`). Extract a reusable Interoptopus pattern only from
-requirements demonstrated by those prototypes.
+the byte reader first, settle the error envelope, then prove the cursor contract
+in `gix-ffi` with at least one repo-borrowing stream (`rev_walk`) and one
+naturally streaming workload (`dirwalk` or `status`). Extract a reusable
+Interoptopus pattern only from requirements demonstrated by those prototypes.
 
 ## Open architecture questions - priority order
 
 | Priority | Open question | What must be decided |
 |---:|---|---|
 | **P0a** | **Byte-stream data plane** | Benchmark caller-buffer pull, scoped view/callback and chunked `Vec<u8>` transfer against both a large materialised blob and a genuinely streaming gix `Read` source. Freeze the byte ABI only after throughput, allocations, copies, peak memory and cancellation/disposal are understood. Caller-buffer pull is the leading design. |
-| **P0b** | **Structured cursors** | With the stream lifecycle constrained by P0a, freeze bounded batched managed pull, direct-vs-producer/channel adaptation, item-error vs terminal-failure semantics, final outcomes, single-consumer behaviour and automated ownership-closed payload enforcement. |
-| **P1** | **Error ABI** | The current coarse `GixErrorKind` is insufficient for full coverage, and the old reason for deferral no longer applies once breadth resumes. Define a stable domain/context/source taxonomy before many more consumers start catching the current shape. |
-| **P2** | **Stateful resources / transactions** | Index editing, refs/config transactions, worktree mutation, writers/editors and reusable diff caches need explicit ownership, disposal and commit/rollback rules. |
-| **P3** | **Callbacks, progress, cancellation, credentials** | Network and long-running operations need a single policy for managed callbacks, worker-thread invocation, reentrancy, cancellation and managed-exception propagation. Managed callbacks should not become the default record- or byte-stream transport merely because Interoptopus supports them. |
-| **P4** | **Filesystem paths vs Git bytes** | Git names/messages remain byte-faithful. OS filesystem paths need a separate platform-faithful representation and conversion policy. |
-| **P5** | **Feature/build profiles** | Full coverage meets mutually awkward blocking/async and transport feature sets. Decide whether coverage is delivered by profiles/artifacts rather than pretending all features can coexist in one binary. |
-| **P6** | **ABI evolution and API guards** | `gix-ffi::ffi_inventory()` already registers `guard!(ffi_inventory)`, and the C# backend checks the baked API hash against the loaded DLL. Keep that guard non-optional. The open work is the compatibility policy for additions and changes to enums, records and functions; use the guard salt for important behavioural/layout changes not reflected in signatures. |
-| **P7** | **Interoptopus supportability** | No cursor/stream primitive exists today; missing `builtins_vec!` validation and the lack of a green C# snapshot baseline are maintenance risks. Prove gix-specific shapes before promoting new generic Interoptopus abstractions. |
+| **P0b** | **Error ABI** | Make the one intentional cross-cutting taxonomy break before breadth or cursor error semantics are frozen. Keep one public `GixException`; replace the payload enum with a composite error envelope; define small semantic `Kind`, extensible ASCII `Code`, orthogonal retryability, diagnostic-only message, selective typed detail, and centralized exhaustive classification. |
+| **P0c** | **Structured cursors** | With the stream lifecycle constrained by P0a and the error envelope fixed by P0b, freeze bounded batched managed pull, direct-vs-producer/channel adaptation, item-error vs terminal-failure semantics, final outcomes, single-consumer behaviour and automated ownership-closed payload enforcement. Preserve eager managed convenience methods as materializers over streaming where compatibility warrants it. |
+| **P1** | **Stateful resources / transactions** | Index editing, refs/config transactions, worktree mutation, writers/editors and reusable diff caches need explicit ownership, service-vs-method boundaries, disposal and commit/rollback rules. This can be designed per affected API family rather than changing every existing operation. |
+| **P2** | **Callbacks, progress, cancellation, credentials** | Network and long-running operations need a single policy for managed callbacks, worker-thread invocation, reentrancy, cancellation and managed-exception propagation. Managed callbacks should not become the default record- or byte-stream transport merely because Interoptopus supports them. |
+| **P3** | **Filesystem paths vs Git bytes** | Git names/messages remain byte-faithful. OS filesystem paths need a separate platform-faithful representation and conversion policy. |
+| **P4** | **Feature/build profiles** | Full coverage meets mutually awkward blocking/async and transport feature sets. Decide whether coverage is delivered by profiles/artifacts rather than pretending all features can coexist in one binary. |
+| **P5** | **ABI evolution and API guards** | `gix-ffi::ffi_inventory()` already registers `guard!(ffi_inventory)`, and the C# backend checks the baked API hash against the loaded DLL. Keep that guard non-optional. The open work is the compatibility policy for additions and changes to enums, records and functions; use the guard salt for important behavioural/layout changes not reflected in signatures. |
+| **P6** | **Interoptopus supportability** | No cursor/stream primitive exists today; missing `builtins_vec!` validation and the lack of a green C# snapshot baseline are maintenance risks. Prove gix-specific shapes before promoting new generic Interoptopus abstractions. |
 
 ## Next step
 
 The managed layer is done for the POC surface, so issue `99208883` is
 effectively closed. Do not resume broad surface expansion yet. Resolve the
-high-coupling architecture in this order:
+high-coupling boundary work in this order:
 
 1. **P0a byte streams:** prototype the three transfer shapes on a large blob
    and on a genuinely streaming gix `Read` source; measure throughput,
    allocations, copies, peak native/managed memory, call count and
    cancellation/disposal. Caller-buffer pull is the leading design.
-2. **P0b structured cursors:** with the byte-stream lifecycle constraints
-   known, replace the eager `rev_walk` precedent with a bounded-batch cursor
-   and exercise the same managed contract against `dirwalk` or `status`.
-3. **P1 error ABI:** define the stable error taxonomy before breadth resumes;
-   the coarse `GixErrorKind` shape is POC-only and should not become the
-   accidental long-term contract.
+2. **P0b error ABI:** replace the current payload-enum error with the composite
+   envelope, freeze semantic `Kind` categories and the extensible `Code`
+   convention, expose retryability separately, map the current read/write
+   failure modes exhaustively, and preserve one public `GixException`. Add
+   tests for actionable cases such as object-kind mismatch, conflicted index,
+   empty-commit refusal, reference lock contention and reference-out-of-date;
+   no test or managed branch should depend on parsing diagnostic messages.
+3. **P0c structured cursors:** with both stream lifecycle and error semantics
+   fixed, replace the native eager `rev_walk` precedent with a bounded-batch
+   cursor and exercise the same managed contract against `dirwalk` or `status`.
+   Keep the existing managed `RevWalk(...)` as a materialising convenience over
+   the streaming implementation rather than breaking its public signature.
 4. add automated ownership-closure enforcement for stream/cursor payloads.
-5. then resume breadth module by module, pairing each Rust facade addition
+5. **P1 stateful resources:** settle service-vs-method ownership plus
+   commit/rollback/disposal rules before expanding index/ref/config/worktree
+   mutation families.
+6. then resume breadth module by module, pairing each Rust facade addition
    with its managed wrapper and tests and keeping rule 8 green.
 
 The target remains **full gix coverage**. Small bounded materialisation may
