@@ -16,10 +16,9 @@
   <PropertyGroup>
     <PackageId>GixSharp</PackageId>
     <Version>0.1.0-alpha.1</Version>
-    <Description>.NET bindings over gitoxide (gix), generated with interoptopus.</Description>
-    <!-- No documentation file: the only sources here are generated, and
-         every public member would raise CS1591. Revisit when a hand-written
-         managed layer exists that is worth documenting. -->
+    <Description>Managed .NET bindings over gitoxide (gix), with interoptopus-generated native interop.</Description>
+    <!-- Keep documentation output disabled while the generated public interop
+         surface lacks XML comments. The managed layer is documented inline. -->
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- Package carries native code and is therefore RID-specific. -->
     <NoWarn>$(NoWarn);NU5128</NoWarn>
