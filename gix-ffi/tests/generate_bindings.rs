@@ -7,10 +7,18 @@
 //! Run with `cargo test --test generate_bindings`.
 
 use interoptopus_csharp::RustLibrary;
+use interoptopus_csharp::dispatch::Dispatch;
 
 /// Where generated C# lands. Checked in, so the C# side can build without
 /// a Rust toolchain and so generator changes show up as reviewable diffs.
 const OUT_DIR: &str = "bindings";
+
+/// C# namespace for all generated declarations.
+///
+/// Without this everything lands in the global namespace, which is fine
+/// for a test harness and wrong for a shipped package: `Bool`, `Unit` and
+/// `Utf8String` would collide with consumer code.
+const NAMESPACE: &str = "GixSharp";
 
 #[test]
 fn generate_csharp_bindings() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,7 +27,11 @@ fn generate_csharp_bindings() -> Result<(), Box<dyn std::error::Error>> {
     // `dll_name` is what lands in `[DllImport("...")]`. The cdylib produced
     // by this crate is `gix_ffi.dll` / `libgix_ffi.so`, so the name has an
     // underscore even though the package is `gix-ffi`.
-    let output = RustLibrary::builder(inventory).dll_name("gix_ffi").build().process()?;
+    let output = RustLibrary::builder(inventory)
+        .dll_name("gix_ffi")
+        .dispatch(Dispatch::single_file(NAMESPACE))
+        .build()
+        .process()?;
 
     // `write_buffers_to` does not create the directory.
     std::fs::create_dir_all(OUT_DIR)?;

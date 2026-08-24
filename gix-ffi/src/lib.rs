@@ -9,25 +9,30 @@
 //! 2. `ThreadSafeRepository` is the stored form. `gix::Repository` holds
 //!    `Option<RefCell<Vec<Vec<u8>>>>` and is therefore never `Sync`;
 //!    `to_thread_local()` is called per operation.
-//! 3. One error type for now - see `GixError`.
+//! 3. Paths and other git data cross as BYTES, not UTF-8 strings. Git
+//!    stores paths, ref names, author names and messages as `BString`.
+//!    Taking `ffi::String` would validate as UTF-8 and reject repositories
+//!    that git itself handles, and widening the type later would break
+//!    every consumer.
+//! 4. One error type for now - see `GixError`.
 
 use interoptopus::ffi;
 use interoptopus::inventory::RustInventory;
-use interoptopus::{builtins_string, guard, service};
+use interoptopus::{builtins_string, builtins_vec, guard, service};
 
 /// The single error type crossing the boundary.
 ///
-/// Deliberately coarse. `gix` error enums are mostly *struct* variants
-/// (`LockCommit { source, full_name }`), and interoptopus payload enums
-/// support single-field tuple variants only - struct variants and
+/// Deliberately coarse for now. `gix` error enums are mostly *struct*
+/// variants (`LockCommit { source, full_name }`), and interoptopus payload
+/// enums support single-field tuple variants only - struct variants and
 /// multi-field tuple variants are explicitly unsupported. Rather than
 /// introduce a companion `#[ffi]` struct per fielded variant across
 /// hundreds of `gix` variants, the whole `Display`/`source` chain is
 /// flattened into one message string here.
 ///
-/// Each variant still becomes its own generated C# exception type, so
-/// callers can catch by category. Finer per-domain error types can be
-/// added later without breaking this one.
+/// Splitting this into per-domain error types is a breaking change for
+/// anyone matching on it, so it should happen once there are enough
+/// operations to design a real taxonomy against - not from one call site.
 #[ffi]
 #[derive(Debug, Clone)]
 pub enum GixError {
@@ -37,6 +42,10 @@ pub enum GixError {
     Io(ffi::String),
     /// Repository configuration could not be read or is invalid.
     Config(ffi::String),
+    /// A path supplied by the caller could not be represented on this
+    /// platform. Only reachable on Windows, where paths must round-trip
+    /// through UTF-16.
+    InvalidPath(ffi::String),
     /// Anything not yet categorised.
     Other(ffi::String),
 }
@@ -62,6 +71,7 @@ impl From<gix::open::Error> for GixError {
         match err {
             gix::open::Error::NotARepository { .. } => Self::NotARepository(msg),
             gix::open::Error::Config(_) => Self::Config(msg),
+            gix::open::Error::Io(_) => Self::Io(msg),
             _ => Self::Other(msg),
         }
     }
@@ -79,17 +89,28 @@ pub struct Repo {
 #[ffi]
 impl Repo {
     /// Open an existing repository at `path`.
-    pub fn open(path: ffi::String) -> ffi::Result<Self, GixError> {
-        match gix::ThreadSafeRepository::open(path.as_str()) {
+    ///
+    /// `path` is raw bytes in the platform's native encoding, not UTF-8.
+    /// On Windows it must still round-trip through UTF-16, hence the
+    /// fallible conversion.
+    pub fn open(path: ffi::Slice<u8>) -> ffi::Result<Self, GixError> {
+        let path = match gix::path::try_from_byte_slice(path.as_slice()) {
+            Ok(path) => path,
+            Err(err) => {
+                return ffi::Err(GixError::InvalidPath(chain_to_string(&err)));
+            }
+        };
+        match gix::ThreadSafeRepository::open(path) {
             Ok(inner) => ffi::Ok(Self { inner }),
             Err(err) => ffi::Err(err.into()),
         }
     }
 
-    /// Absolute path of the `.git` directory.
-    pub fn git_dir(&self) -> ffi::Result<ffi::String, GixError> {
+    /// Absolute path of the `.git` directory, as raw platform bytes.
+    pub fn git_dir(&self) -> ffi::Result<ffi::Vec<u8>, GixError> {
         let repo = self.inner.to_thread_local();
-        ffi::Ok(ffi::String::from(repo.git_dir().display().to_string()))
+        let bytes = gix::path::into_bstr(repo.git_dir().to_owned()).into_owned();
+        ffi::Ok(ffi::Vec::from(Vec::from(bytes)))
     }
 
     /// Whether this repository has no working tree.
@@ -103,10 +124,17 @@ impl Repo {
 /// `guard!` emits an API hash checked by the generated C# at load time;
 /// it is the defence against bindings drifting from the DLL, which is
 /// otherwise silent and undetectable at the ABI level.
+///
+/// `builtins_vec!(u8)` is required, not optional. Without it the backend
+/// still emits *references* to `VecByte` for `ffi::Vec<u8>` returns but
+/// never emits the type itself. The Rust side compiles either way, so
+/// only the C# compiler catches the omission. Note it takes the element
+/// type, unlike `builtins_string!()`.
 pub fn ffi_inventory() -> RustInventory {
     RustInventory::new()
         .register(guard!(ffi_inventory))
         .register(builtins_string!())
+        .register(builtins_vec!(u8))
         .register(service!(Repo))
         .validate()
 }

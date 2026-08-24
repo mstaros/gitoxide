@@ -1,4 +1,12 @@
 /target
+
+# Machine-local build overrides: absolute paths, not portable.
+/.cargo/
+
+# Native artifacts are produced by `cargo build` and staged by the csproj.
+# They are packed into the NuGet package at pack time, not checked in.
+/bindings/**/runtimes/
+
 /bindings/**/obj
 /bindings/**/bin
 *.sln

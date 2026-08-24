@@ -1228,8 +1228,6 @@ checksum = "eaec953f16e5bcf6b8a3cb3aa959b17e5577dbd2693e94554c462c08be22624b"
 [[package]]
 name = "interoptopus"
 version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ae3b250a23b4dcf74a2dc83b94e659fad8f7252ab8c4c737cb1b95ad2f81602"
 dependencies = [
  "interoptopus_proc",
 ]
@@ -1237,8 +1235,6 @@ dependencies = [
 [[package]]
 name = "interoptopus_backends"
 version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f15cc41ae07e82afeaf2572fd05801f3bd991443ae16897edbd7ef76c26c758e"
 dependencies = [
  "interoptopus",
  "tar",
@@ -1248,8 +1244,6 @@ dependencies = [
 [[package]]
 name = "interoptopus_csharp"
 version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b706d31e71ee5c33cce97bc24bfc8b785ed4a1e9b2a92750a3b49e55127aa2f8"
 dependencies = [
  "interoptopus",
  "interoptopus_backends",
@@ -1258,8 +1252,6 @@ dependencies = [
 [[package]]
 name = "interoptopus_proc"
 version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81dac4882b05129dceeb87075a5327c567b715540c281ef6c6d7354b15659c5b"
 dependencies = [
  "interoptopus_proc_impl",
 ]
@@ -1267,8 +1259,6 @@ dependencies = [
 [[package]]
 name = "interoptopus_proc_impl"
 version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "131abeb9e6dccc4fed2bc1ff84539c6f04d282c95a88896b6d93721e77069100"
 dependencies = [
  "prettyplease",
  "proc-macro2",
