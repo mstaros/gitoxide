@@ -206,7 +206,7 @@ Implemented and validated with OpenAI Codex assistance.
 id: 2c6f1a04
 kind: issue
 severity: high
-status: open
+status: closed
 ```
 
 ### Scope
@@ -220,6 +220,21 @@ Normal entries, executable/symlink modes, intent-to-add where supported, conflic
 ### Dependencies
 
 Repository core and discovery; object identifiers from objects and commit graph.
+
+### Resolution
+
+Implemented the complete mapped index/conflicts surface in the Rust FFI and idiomatic managed layer.
+
+- Staging uses gitoxide status traversal and the clean-filter pipeline, handles recursive untracked paths, tracked deletion, intent-to-add replacement, ignored paths, gitlinks, filesystem modes, pathspecs, and locked index writes.
+- Unstage restores selected paths from HEAD or removes them for an unborn repository without changing the worktree. Update touches tracked paths only, refresh physically reopens the index, and every entry mutation invalidates stale tree-cache data.
+- Index enumeration preserves every stage and exact raw Git path bytes while `GitIndexEntry` exposes a decoded `Path`, `Stage`, and cloned `PathBytes`.
+- Conflict deletion removes every stage for one path. Tree writing rejects unresolved stages and leaves HEAD, the worktree, and the index unchanged.
+- Seven dedicated Rust tests and seven dedicated managed tests cover the mapped behavior and current CSharpMpc consumer shapes without invoking the Git executable. Platform-specific executable, symlink, and non-UTF-8 path coverage runs where supported.
+- The binding generator passed and reproduced the exact 203,213-byte `Interop.cs`; the full Rust suite passes (1 generator, 7 index, 5 objects/commit graph, 3 repository core, and 6 status tests).
+- Roslyn/MSBuild reports zero diagnostics and the complete 45/45 TUnit suite passes against the real native DLL.
+- Public managed signatures contain no generated Interoptopus resource types.
+
+Implemented and validated with OpenAI Codex assistance.
 
 ## References and branches parity
 

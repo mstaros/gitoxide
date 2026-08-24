@@ -78,7 +78,10 @@ fn validate(show: u32, flags: u32) -> Result<(), GixError> {
     Ok(())
 }
 
-fn pathspecs(bytes: &[u8], literal: bool) -> Result<Vec<gix::bstr::BString>, GixError> {
+pub(crate) fn pathspecs(
+    bytes: &[u8],
+    literal: bool,
+) -> Result<Vec<gix::bstr::BString>, GixError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }

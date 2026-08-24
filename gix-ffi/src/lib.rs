@@ -25,7 +25,9 @@ use interoptopus::ffi;
 use interoptopus::inventory::RustInventory;
 use interoptopus::{builtins_string, builtins_vec, guard, service};
 
+mod index;
 mod status;
+pub use index::IndexEntryRecord;
 pub use status::StatusRecord;
 
 /// The single error type crossing the boundary.
@@ -970,6 +972,84 @@ impl Repo {
         }
     }
 
+    /// Add matching working-directory changes to the index and write it.
+    ///
+    /// Pathspecs are a NUL-separated list of raw Git pathspec bytes.
+    pub fn stage(&self, pathspecs: ffi::Slice<u8>) -> ffi::Result<(), GixError> {
+        let repo = self.inner.to_thread_local();
+        match index::stage(&repo, pathspecs.as_slice()) {
+            Ok(()) => ffi::Ok(()),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Restore matching index entries from HEAD without changing the worktree.
+    ///
+    /// An empty pathspec list selects every index path. In an unborn
+    /// repository the selected entries are removed.
+    pub fn unstage(&self, pathspecs: ffi::Slice<u8>) -> ffi::Result<(), GixError> {
+        let repo = self.inner.to_thread_local();
+        match index::unstage(&repo, pathspecs.as_slice()) {
+            Ok(()) => ffi::Ok(()),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Physically reload and validate the repository index from disk.
+    ///
+    /// Each FFI operation creates a fresh thread-local repository, so both
+    /// force modes observe the physical file instead of a retained snapshot.
+    pub fn refresh_index(&self, force: bool) -> ffi::Result<(), GixError> {
+        let repo = self.inner.to_thread_local();
+        match index::refresh(&repo, force) {
+            Ok(()) => ffi::Ok(()),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Update matching tracked entries from the worktree and write the index.
+    ///
+    /// Untracked paths are never added. Pathspecs are NUL-separated raw Git
+    /// pathspec bytes.
+    pub fn update_index(&self, pathspecs: ffi::Slice<u8>) -> ffi::Result<(), GixError> {
+        let repo = self.inner.to_thread_local();
+        match index::update(&repo, pathspecs.as_slice()) {
+            Ok(()) => ffi::Ok(()),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Return every index entry, including separate conflict stages.
+    pub fn index_entries(&self) -> ffi::Result<ffi::Vec<IndexEntryRecord>, GixError> {
+        let repo = self.inner.to_thread_local();
+        match index::entries(&repo) {
+            Ok(entries) => ffi::Ok(ffi::Vec::from(entries)),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Resolve a conflicted path as deleted by removing all of its stages.
+    pub fn resolve_conflict_as_deleted(
+        &self,
+        path: ffi::Slice<u8>,
+    ) -> ffi::Result<(), GixError> {
+        let repo = self.inner.to_thread_local();
+        match index::resolve_conflict_as_deleted(&repo, path.as_slice()) {
+            Ok(()) => ffi::Ok(()),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Write the conflict-free index as a tree object without changing the
+    /// index, worktree, or any reference.
+    pub fn write_index_tree(&self) -> ffi::Result<ffi::String, GixError> {
+        let repo = self.inner.to_thread_local();
+        match tree_from_index(&repo) {
+            Ok(id) => ffi::Ok(hex(id.as_ref())),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
     /// Return whether ancestor is reachable from descendant.
     pub fn is_ancestor_of(
         &self,
@@ -1029,6 +1109,7 @@ pub fn ffi_inventory() -> RustInventory {
         .register(builtins_string!())
         .register(builtins_vec!(u8))
         .register(builtins_vec!(ffi::String))
+        .register(builtins_vec!(IndexEntryRecord))
         .register(builtins_vec!(StatusRecord))
         .register(service!(Repo))
         .validate()
