@@ -143,13 +143,24 @@ for `blocking-client` + `async-client` together.
 8. **Nothing generated escapes the managed layer.** Enforced by
    `ManagedRepositorySignatures_DoNotExposeGeneratedResources`, a reflection
    test. Keep that test passing as the surface grows.
+9. **One managed/FFI surface, multiple native engines.** Build-profile
+   differences must not add/remove FFI functions, records or enum variants.
+   Every native artifact shipped in one package version must have the same
+   Interoptopus inventory and API-guard hash; capability differences are
+   runtime data, not a different managed API.
+10. **Managed compatibility and native ABI compatibility are different
+    contracts.** Public managed API follows SemVer. Generated/native ABI is an
+    exact-version implementation detail shipped in lockstep and guarded by
+    `guard!(ffi_inventory)`; cross-version DLL compatibility is not promised.
 
-Pinned gix features (matches what `cargo rustdoc --output-format json` was
-validated with): `parallel`, `attributes`, `revision`, `blame`, `merge`,
-`status`, `dirwalk`, `index`, `worktree-mutation`, `blocking-network-client`.
-Default features stay ON. Full coverage does **not** imply that every mutually
-incompatible Cargo feature can live in one binary; feature/build profiles are
-an open architecture question below.
+The **current POC build** still uses gix default features plus explicit
+`parallel`, `attributes`, `revision`, `blame`, `merge`, `status`, `dirwalk`,
+`index`, `worktree-mutation` and `blocking-network-client`. That is current
+state, not the target build architecture. The target profiles below make gix
+features explicit (`default-features = false`), enable both `sha1` and `sha256`
+in every released engine, and select exactly one native networking engine per
+artifact.
+
 
 ## Traps - each of these cost real time
 
@@ -202,6 +213,16 @@ Each was believed and wrong. Recorded so they are not re-derived:
   repo's CLAUDE.md is stale on this.
 - gix handles linked worktrees correctly - `git_dir()` resolves to
   `<main>/.git/worktrees/<name>`, which does NOT end in `.git`.
+- `gix-hash` does **not** require exactly one of `sha1` / `sha256`. It only
+  rejects builds with neither enabled; gitoxide's own development dependencies
+  enable both. GixSharp should therefore compile both hash algorithms into
+  every released native engine instead of creating hash-specific profiles.
+- The blocking/async networking split **is** real, but the explicit
+  `compile_error!` is in `gitoxide-core`, not `gix-ffi` itself. `gix` documents
+  its async and blocking network-client feature families as mutually exclusive,
+  so released GixSharp artifacts must still select exactly one engine rather
+  than depending on accidental feature unification.
+
 
 ## Unverified claims
 
@@ -405,7 +426,139 @@ in `gix-ffi` with at least one repo-borrowing stream (`rev_walk`) and one
 naturally streaming workload (`dirwalk` or `status`). Extract a reusable
 Interoptopus pattern only from requirements demonstrated by those prototypes.
 
+## Resolved cross-cutting contracts - native profiles and ABI evolution
+
+### Native build/profile matrix
+
+"Full gix coverage" does **not** mean one `cargo --all-features` cdylib. It
+means one managed/FFI contract whose implementation coverage is the union of a
+small declared native-profile matrix.
+
+The released matrix has two networking-engine families:
+
+- **blocking engine** - the default engine and the broad transport engine;
+- **async engine** - built from gix's async network-client family. Its current
+  built-in transport capability is narrower: `gix-transport` documents the
+  async client as supporting the TCP `git` transport while custom async
+  transports provide other I/O.
+
+Both engines compile **both SHA-1 and SHA-256**. Hash algorithms are not a
+profile axis. Common gix components (`parallel`, revision, status, diff/merge,
+worktree/index functionality, etc.) are selected identically across engines;
+only genuinely incompatible implementation features differ. The target
+manifest should use explicit features with `default-features = false` so the
+profile definition, not upstream defaults, is the coverage specification.
+
+HTTP implementation/TLS selection is an implementation choice inside the
+blocking engine, not a public GixSharp profile unless it produces a genuinely
+different semantic capability. Do not multiply managed APIs or package
+identities merely to expose curl-vs-reqwest or TLS-backend choices.
+
+**Profile invariance is mandatory:** every engine for one GixSharp package
+version exports the exact same Interoptopus inventory. Do not `#[cfg]` an FFI
+function/type out of one engine. A logically unavailable operation remains in
+the ABI and is reported as unavailable at runtime. CI must generate/validate
+both engine builds and require identical generated bindings / API-guard hash.
+
+The managed layer keeps one logical native library name. Engine selection is a
+hand-written managed concern performed before the first native call; a .NET
+native-library resolver can map the generated logical import to the selected
+physical engine artifact. Selection becomes immutable once native resolution
+has occurred. The exact public configuration type/name is intentionally not
+specified here.
+
+The current package glob `runtimes/**/native/*` can already carry multiple
+native files per RID. The build/staging target currently assumes one output and
+must be generalized when the second engine lands; the NuGet directory shape
+itself does not need redesigning.
+
+Every engine exposes the same small runtime-information/capability bootstrap.
+Capabilities describe stable **GixSharp semantics** (for example supported hash
+algorithms and transport families), not Cargo feature names. Prefer a
+fixed-layout capability bitset with reserved bits so adding a capability does
+not itself change the FFI record layout. Capability values may differ by
+engine; the ABI may not.
+
+Capability absence is not an operational failure:
+
+- the managed wrapper preflights a known-missing capability and throws
+  `NotSupportedException`;
+- the native FFI still defensively returns the normal error envelope with
+  `Kind=Unsupported` / an appropriate machine-readable code when called
+  directly or when capability state races/mismatches;
+- stream/cursor creation fails before yielding items when the whole operation
+  is unavailable. Do not turn profile absence into a terminal stream error.
+
+The public networking API must likewise remain engine-independent. Do not make
+managed method shape (sync vs async, parameters, result types) vary according
+to which native engine was loaded. The later callback/cancellation work decides
+how a blocking native implementation and an async native implementation satisfy
+the same managed operation contract.
+
+### ABI evolution policy
+
+There are two compatibility boundaries and they intentionally have different
+rules.
+
+**Generated/native FFI ABI is exact-version lockstep.** It is a private
+implementation detail shipped with the managed package. GixSharp does not
+promise that managed bindings from package version N can load a native DLL from
+N-1 or N+1. `guard!(ffi_inventory)` is the enforcement mechanism: any signature,
+record-layout or enum-layout change regenerates `Interop.cs` and changes the API
+hash, and mismatched binaries fail immediately. Important behavioral/layout
+changes not represented in signatures must also change the guard salt.
+
+This means FFI records and enums do **not** need awkward reserved fields or a
+per-struct versioning protocol merely to preserve cross-package binary
+compatibility. They may evolve between package versions as long as generated
+bindings and all native engines are rebuilt and shipped together. Within one
+package version, however, every engine must have an identical FFI inventory and
+guard hash.
+
+**The hand-written managed API is the public compatibility contract.** Once
+stable, it follows SemVer independently of native churn. During the current
+pre-1.0 phase breaking changes are permitted by SemVer but must still be
+intentional and documented rather than accidental. Apply these rules now:
+
+- adding a new top-level method/type is normally additive;
+- never change/remove an existing public method signature to add an option;
+  preserve it and add a non-ambiguous overload or a new operation shape;
+- return-type changes, renames and removals are breaking;
+- avoid growable public interfaces; adding an abstract interface member is
+  breaking;
+- public positional records have frozen constructor/deconstruction shape once
+  exposed. Do not append positional fields later; use a new result type or a
+  separate accessor when materially new data is needed;
+- closed public enums are treated as closed contracts. Adding a member can
+  break exhaustive consumer switches and therefore is not casually additive.
+  Use extensible strings/codes for open domains (`GixException.Code` is the
+  deliberate example), and use `[Flags]` only for domains explicitly
+  documented to tolerate new bits;
+- `GixException` remains one class. Adding diagnostic/actionable properties is
+  additive; changing the meaning of an existing `Kind` is breaking. Keep the
+  small `Kind` taxonomy stable and grow exact reasons through `Code`;
+- generated Interoptopus resources remain internal so native ABI evolution
+  never leaks directly into consumer signatures.
+
+Release validation needs two independent gates:
+
+1. **native profile equivalence:** build every native engine for a representative
+   RID and prove the same generated inventory / guard hash, then load each with
+   the same generated C# and verify its advertised capabilities;
+2. **managed public-API compatibility:** compare the hand-written public surface
+   against an approved baseline and separately flag changes to closed enums and
+   positional record shapes. The exact checker may be ApiCompat,
+   PublicApiAnalyzer or an equivalent deterministic snapshot; the required
+   policy above is the contract, not a particular tool.
+
+`guard!` therefore solves exact native pairing, not public SemVer. Conversely,
+managed SemVer does not require keeping old native layouts alive. Keeping those
+boundaries separate is what makes hundreds of future FFI additions tractable.
 ## Open architecture questions - priority order
+
+Feature/build profiles and ABI evolution are no longer open architecture
+questions; their contracts are fixed in the section above. The remaining open
+questions are:
 
 | Priority | Open question | What must be decided |
 |---:|---|---|
@@ -415,9 +568,8 @@ Interoptopus pattern only from requirements demonstrated by those prototypes.
 | **P1** | **Stateful resources / transactions** | Index editing, refs/config transactions, worktree mutation, writers/editors and reusable diff caches need explicit ownership, service-vs-method boundaries, disposal and commit/rollback rules. This can be designed per affected API family rather than changing every existing operation. |
 | **P2** | **Callbacks, progress, cancellation, credentials** | Network and long-running operations need a single policy for managed callbacks, worker-thread invocation, reentrancy, cancellation and managed-exception propagation. Managed callbacks should not become the default record- or byte-stream transport merely because Interoptopus supports them. |
 | **P3** | **Filesystem paths vs Git bytes** | Git names/messages remain byte-faithful. OS filesystem paths need a separate platform-faithful representation and conversion policy. |
-| **P4** | **Feature/build profiles** | Full coverage meets mutually awkward blocking/async and transport feature sets. Decide whether coverage is delivered by profiles/artifacts rather than pretending all features can coexist in one binary. |
-| **P5** | **ABI evolution and API guards** | `gix-ffi::ffi_inventory()` already registers `guard!(ffi_inventory)`, and the C# backend checks the baked API hash against the loaded DLL. Keep that guard non-optional. The open work is the compatibility policy for additions and changes to enums, records and functions; use the guard salt for important behavioural/layout changes not reflected in signatures. |
-| **P6** | **Interoptopus supportability** | No cursor/stream primitive exists today; missing `builtins_vec!` validation and the lack of a green C# snapshot baseline are maintenance risks. Prove gix-specific shapes before promoting new generic Interoptopus abstractions. |
+| **P4** | **Interoptopus supportability** | No cursor/stream primitive exists today; missing `builtins_vec!` validation and the lack of a green C# snapshot baseline are maintenance risks. Prove gix-specific shapes before promoting new generic Interoptopus abstractions. |
+
 
 ## Next step
 
@@ -432,25 +584,38 @@ high-coupling boundary work in this order:
 2. **P0b error ABI:** replace the current payload-enum error with the composite
    envelope, freeze semantic `Kind` categories and the extensible `Code`
    convention, expose retryability separately, map the current read/write
-   failure modes exhaustively, and preserve one public `GixException`. Add
-   tests for actionable cases such as object-kind mismatch, conflicted index,
-   empty-commit refusal, reference lock contention and reference-out-of-date;
-   no test or managed branch should depend on parsing diagnostic messages.
+   failure modes exhaustively, and preserve one public `GixException`. Include
+   `Unsupported` as the defensive native representation of a missing build
+   capability, while the managed layer preflights known absence as
+   `NotSupportedException`. Add tests for actionable cases such as object-kind
+   mismatch, conflicted index, empty-commit refusal, reference lock contention
+   and reference-out-of-date; no test or managed branch should depend on
+   parsing diagnostic messages.
 3. **P0c structured cursors:** with both stream lifecycle and error semantics
    fixed, replace the native eager `rev_walk` precedent with a bounded-batch
    cursor and exercise the same managed contract against `dirwalk` or `status`.
    Keep the existing managed `RevWalk(...)` as a materialising convenience over
    the streaming implementation rather than breaking its public signature.
 4. add automated ownership-closure enforcement for stream/cursor payloads.
-5. **P1 stateful resources:** settle service-vs-method ownership plus
+5. **Install compatibility/profile infrastructure before breadth accelerates:**
+   make the shared gix feature set explicit with both hash algorithms; add the
+   runtime capability bootstrap; establish the managed public-API baseline;
+   and add a profile-equivalence validation that requires every released native
+   engine to produce the same Interoptopus inventory/API-guard hash. The second
+   physical native engine and generalized RID staging must exist before the
+   first profile-specific/network surface is considered complete.
+6. **P1 stateful resources:** settle service-vs-method ownership plus
    commit/rollback/disposal rules before expanding index/ref/config/worktree
    mutation families.
-6. then resume breadth module by module, pairing each Rust facade addition
-   with its managed wrapper and tests and keeping rule 8 green.
+7. then resume breadth module by module, pairing each Rust facade addition
+   with its managed wrapper and tests and keeping rules 8-10 green.
 
-The target remains **full gix coverage**. Small bounded materialisation may
-still be selected locally when it is demonstrably the right API shape, but it
-is an optimisation decision, not the architecture for iteration or bulk data.
+The target remains **full gix coverage**: the managed/FFI surface represents
+the union of the declared native-profile capabilities, not one impossible
+all-features binary. Small bounded materialisation may still be selected
+locally when it is demonstrably the right API shape, but it is an optimisation
+decision, not the architecture for iteration or bulk data.
+
 
 ## Also outstanding
 
