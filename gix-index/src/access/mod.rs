@@ -9,9 +9,8 @@ use crate::{
     extension,
 };
 
-// TODO: integrate this somehow, somewhere, depending on later usage.
-#[expect(dead_code, reason = "to be used for when we handle checkouts/resets better")]
-mod sparse;
+/// Configuration related to sparse checkouts and sparse indexes.
+pub mod sparse;
 
 /// General information and entries
 impl State {

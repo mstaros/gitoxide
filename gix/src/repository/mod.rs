@@ -58,6 +58,9 @@ mod reference;
 mod remote;
 mod revision;
 mod shallow;
+/// Sparse-checkout porcelain operations.
+#[cfg(feature = "worktree-mutation")]
+pub mod sparse_checkout;
 mod state;
 #[cfg(feature = "attributes")]
 mod submodule;

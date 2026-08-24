@@ -25,6 +25,8 @@ mod pathspec;
 mod reference;
 mod remote;
 mod shallow;
+#[cfg(feature = "worktree-mutation")]
+mod sparse_checkout;
 mod state;
 #[cfg(feature = "attributes")]
 mod submodule;

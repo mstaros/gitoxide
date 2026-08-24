@@ -56,6 +56,17 @@ impl File {
         skip_hash: bool,
         options: decode::Options,
     ) -> Result<Self, Error> {
+        Self::at_with_sparse_options(path, object_hash, skip_hash, Default::default(), options)
+    }
+
+    /// Open an index file like [`File::at()`], retaining the sparse-checkout configuration supplied by the caller.
+    pub fn at_with_sparse_options(
+        path: impl Into<PathBuf>,
+        object_hash: gix_hash::Kind,
+        skip_hash: bool,
+        sparse_options: crate::sparse::Options,
+        options: decode::Options,
+    ) -> Result<Self, Error> {
         let _span = gix_features::trace::detail!("gix_index::File::at()");
         let path = path.into();
         let (data, mtime) = {
@@ -95,7 +106,12 @@ impl File {
         };
 
         let (state, checksum) = State::from_bytes(&data, mtime, object_hash, options)?;
-        let mut file = File { state, path, checksum };
+        let mut file = File {
+            state,
+            path,
+            checksum,
+            sparse_options,
+        };
         if let Some(mut link) = file.link.take() {
             link.dissolve_into(&mut file, object_hash, skip_hash, options)?;
         }
@@ -111,6 +127,7 @@ impl File {
             state,
             path: path.into(),
             checksum: None,
+            sparse_options: Default::default(),
         }
     }
 }

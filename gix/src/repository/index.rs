@@ -1,5 +1,5 @@
 use crate::{
-    config::{cache::util::ApplyLeniencyDefault, tree::Index},
+    config::{cache::util::ApplyLeniencyDefault, tree::{Core, Index}},
     worktree,
     worktree::IndexPersistedOrInMemory,
 };
@@ -35,10 +35,31 @@ impl crate::Repository {
             .with_lenient_default(self.config.lenient_config)?
             .unwrap_or_default();
 
-        let index = gix_index::File::at(
+        let sparse_checkout = Core::SPARSE_CHECKOUT
+            .enrich_error(self.config.resolved.boolean(Core::SPARSE_CHECKOUT))
+            .with_lenient_default(self.config.lenient_config)
+            .map_err(worktree::open_index::Error::ConfigSparseCheckout)?
+            .unwrap_or_default();
+        let directory_patterns_only = Core::SPARSE_CHECKOUT_CONE
+            .enrich_error(self.config.resolved.boolean(Core::SPARSE_CHECKOUT_CONE))
+            .with_lenient_default(self.config.lenient_config)
+            .map_err(worktree::open_index::Error::ConfigSparseCheckoutCone)?
+            .unwrap_or_default();
+        let write_sparse_index = Index::SPARSE
+            .enrich_error(self.config.resolved.boolean(Index::SPARSE))
+            .with_lenient_default(self.config.lenient_config)
+            .map_err(worktree::open_index::Error::ConfigSparseIndex)?
+            .unwrap_or_default();
+
+        let index = gix_index::File::at_with_sparse_options(
             self.index_path(),
             self.object_hash(),
             skip_hash,
+            gix_index::sparse::Options {
+                sparse_checkout,
+                directory_patterns_only,
+                write_sparse_index,
+            },
             gix_index::decode::Options {
                 thread_limit,
                 min_extension_block_in_bytes_for_threading: 0,
