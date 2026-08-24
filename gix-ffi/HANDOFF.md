@@ -1,7 +1,8 @@
 # gix-ffi / GixSharp — Handoff
 
-State as of 2026-08-24. Last verified commit `d778a55e7`, plus a managed
-layer added after that commit (see Current state).
+State as of 2026-08-24. Audited against `main` at
+`d86fc0ead7ad651c6f0f521cd76068449a4b08bd` and the local Interoptopus
+`docs/csharp-unions.md` plan as it existed on the same date.
 
 ## What this is
 
@@ -60,7 +61,7 @@ out, no generated resource escapes, results outlive the repository,
 
 **Writes are now in scope.** This is no longer a read-only binding.
 `create_commit_object` and `create_commit_from_index` fail in ways a caller
-must act on - lock contention, non-fast-forward, missing parent, dirty
+must act on - lock contention, non-fast-forward, missing parent, conflicted
 index. Read paths tolerated a coarse error type; write paths do not. This is
 the main reason P0b has moved ahead of cursor work.
 
@@ -142,7 +143,10 @@ for `blocking-client` + `async-client` together.
    message, and structured detail only where callers need recovery operands.
 8. **Nothing generated escapes the managed layer.** Enforced by
    `ManagedRepositorySignatures_DoNotExposeGeneratedResources`, a reflection
-   test. Keep that test passing as the surface grows.
+   test. Keep that test passing as the surface grows. Generated C# 15 union
+   case types are still generated resources and remain internal implementation
+   detail unless the hand-written API deliberately defines its own public sum
+   type.
 9. **One managed/FFI surface, multiple native engines.** Build-profile
    differences must not add/remove FFI functions, records or enum variants.
    Every native artifact shipped in one package version must have the same
@@ -152,6 +156,17 @@ for `blocking-client` + `async-client` together.
     contracts.** Public managed API follows SemVer. Generated/native ABI is an
     exact-version implementation detail shipped in lockstep and guarded by
     `guard!(ffi_inventory)`; cross-version DLL compatibility is not promised.
+11. **Closed semantic alternatives are Rust enums; Interoptopus owns their
+    projection.** Do not permanently flatten a natural Rust data enum into a
+    tag-plus-nullable-field record or facade-only wrapper cases to compensate
+    for the current generator's single-payload limitation. Interoptopus is the
+    generic owner of discriminant modeling, ABI lowering and C# projection. Its
+    current union plan fixes discriminant correctness and projects the existing
+    plain `DataEnum` model; full named/multi-field Rust variant support is a
+    separate generic-tool evolution. GixSharp will wait rather than freeze a
+    temporary competing sum-type architecture into its ABI. Open domains such
+    as `GixException.Code` and capability identifiers remain deliberately
+    non-exhaustive and must not become closed unions.
 
 The **current POC build** still uses gix default features plus explicit
 `parallel`, `attributes`, `revision`, `blame`, `merge`, `status`, `dirwalk`,
@@ -197,16 +212,28 @@ generated types into public signatures.
 
 Each was believed and wrong. Recorded so they are not re-derived:
 
-- Payload enums do **not** give free error mapping. Single-field tuple
-  variants only; struct variants and multi-field tuples unsupported. gix
-  error enums are overwhelmingly struct variants, hence the flattening.
-- `body_exception_for_variant` does not produce a distinct exception
-  *class* per variant, but the error data IS fully recoverable:
-  `.AsOk()` throws `EnumException<GixError>` whose `.Value` carries the
-  typed enum. Match on `IsNotARepository` / `IsIo` / ... and read the
-  payload via `AsX()`. **Do not dispose the payload separately** - `AsX()`
-  returns the enum's own field and the enum's `Dispose` covers it;
-  disposing it again is a double-dispose. See `GixRepository.Translate`.
+- The **current** Interoptopus enum model is limited to unit variants and
+  single-payload tuple variants; named/struct variants and multi-field tuples
+  are not represented. That is a real generic-tool limitation, not a GixSharp
+  architecture to preserve. `docs/csharp-unions.md` in the Interoptopus checkout
+  plans to correct discriminant modeling and project the existing plain
+  `DataEnum` model as opt-in C# 15 custom unions without changing the native ABI.
+  Full named/multi-field Rust variant modeling is explicitly separate from that
+  first union implementation. The plan is not implemented yet and still marks
+  Step 0 as blocking.
+- The current C# generator's `body_exception_for_variant` does not produce a
+  distinct exception *class* per variant, but the error data is recoverable:
+  `.AsOk()` throws `EnumException<GixError>` whose `.Value` carries the typed
+  enum. Match on `IsNotARepository` / `IsIo` / ... and read payloads through
+  `AsX()`. **Do not dispose the payload separately** - `AsX()` returns the
+  enum's own field and the enum's `Dispose` covers it; disposing it again is a
+  double-dispose. This describes the current generated bindings only, not the
+  target C# 15 union-facing consumption style.
+- Interoptopus currently has a real discriminant-model defect for payload
+  variants: its C# model uses the positional index for tuple-variant tags while
+  unit variants retain their declared tag. The planned Step 0 fixes this in the
+  generic model before union projection. Do not build GixSharp logic that
+  assumes today's tuple-variant tag behavior is authoritative.
 - Binding generation is a **test**, not `build.rs` - a build script cannot
   call into the crate it is building.
 - `interoptopus_csharp::Interop` does not exist; it is `RustLibrary`. That
@@ -337,11 +364,19 @@ The accepted error direction is:
 
 - **Keep one public `GixException` class.** Do not create an exception subclass
   hierarchy. Existing `catch (GixException)` code should remain valid.
-- **Replace the payload-enum error ABI with one FFI-safe error envelope/record.**
-  `ffi::Result<T, E>` already supplies the discriminated `Err(E)` arm, so `E`
-  can be a composite. This avoids trying to mirror gix's struct-heavy errors
-  through Interoptopus payload enums, which support only single-field tuple
-  variants.
+- **Keep one semantic FFI error envelope.** `ffi::Result<T, E>` still uses one
+  composite `E` carrying stable GixSharp semantics: `Kind`, `Code`, retryability,
+  diagnostic message and selective structured detail. The envelope is retained
+  because these fields cut across concrete gix error variants and protect the
+  managed contract from upstream taxonomy churn; it is **not** a workaround for
+  Interoptopus's current payload-enum limitation.
+- **Structured recovery detail is a closed semantic sum type.** Once the planned
+  Interoptopus C# 15 union projection is available, model actionable detail as
+  an internal Rust data enum and consume the generated union through pattern
+  matching. Examples include reference-conflict detail and object-type-mismatch
+  detail. Use a payload record when that record is itself the natural domain
+  object, not merely to compensate for a generator limitation. Do not mirror
+  every upstream gix error enum one-for-one.
 - **`Kind` is a small semantic/action category, not a mirror of concrete gix
   variants.** The stable semantic buckets need to cover validation/input,
   not-found, failed precondition/state, concurrency conflict, busy/locked,
@@ -350,10 +385,11 @@ The accepted error direction is:
   frozen once against representative mappings, but the categories themselves
   are the intended level of abstraction.
 - **`Code` carries the precise machine-readable reason** as an extensible ASCII
-  identifier rather than another closed enum. Adding a new specific code must
-  not require changing the error record layout. Examples from the current
-  surface include invalid-object-id, object-type-mismatch, index-conflicted,
-  empty-commit-disallowed, reference-out-of-date and lock-unavailable.
+  identifier rather than another closed enum/union. Adding a new specific code
+  must not become an exhaustive-match break for consumers. Examples from the
+  current surface include invalid-object-id, object-type-mismatch,
+  index-conflicted, empty-commit-disallowed, reference-out-of-date and
+  lock-unavailable.
 - **Retryability is orthogonal to `Kind`.** Expose it as a flag/property rather
   than a category. This matches the direction in `gix-error`, which separately
   exposes `can_retry()` alongside validation/not-found/corruption
@@ -363,20 +399,25 @@ The accepted error direction is:
   text.
 - **Use structured detail only where recovery needs operands.** Ref-update
   conflicts need the reference name and expected/actual targets; object-kind
-  mismatch needs object id and expected/actual kind. Do not create a payload
-  type for every error. Generated detail types remain internal; public managed
-  detail is typed and must continue to satisfy rule 8.
+  mismatch needs object id and expected/actual kind. Do not create a detail case
+  for every error just because generated unions make it convenient. Generated
+  union/case types remain internal under rule 8; the public managed detail shape
+  must be deliberately designed and compatibility-reviewed.
 - **Centralise classification.** Important gix error enums get explicit,
   exhaustive matches so newly added upstream variants force a decision at
   compile time. A generic lower layer may recognise `std::io::Error` and
   `gix-error` semantic markers such as validation, not-found, corruption and
   retryability. Never classify by matching `Display` strings.
 
-This is the one intentional taxonomy break to make before breadth. The managed
-migration should preserve `GixException.Operation` and diagnostic message while
-replacing the current coarse `Kind` semantics and adding `Code`, retryability
-and optional typed detail. `guard!(ffi_inventory)` catches managed/native ABI
-mismatch but does not substitute for this compatibility policy.
+This is the one intentional taxonomy break to make before breadth. Freeze the
+semantic envelope now, but do not lock in temporary generated-detail ergonomics
+from today's Interoptopus backend. The final structured-detail ABI should be
+implemented against the planned discriminant fix and C# 15 union projection so
+it does not immediately require a second representation migration. Preserve
+`GixException.Operation` and diagnostic message while replacing the current
+coarse `Kind` semantics and adding `Code`, retryability and optional typed
+detail. `guard!(ffi_inventory)` catches managed/native ABI mismatch but does not
+substitute for this compatibility policy.
 
 ### P0c - structured cursors third
 
@@ -503,10 +544,11 @@ rules.
 **Generated/native FFI ABI is exact-version lockstep.** It is a private
 implementation detail shipped with the managed package. GixSharp does not
 promise that managed bindings from package version N can load a native DLL from
-N-1 or N+1. `guard!(ffi_inventory)` is the enforcement mechanism: any signature,
-record-layout or enum-layout change regenerates `Interop.cs` and changes the API
-hash, and mismatched binaries fail immediately. Important behavioral/layout
-changes not represented in signatures must also change the guard salt.
+N-1 or N+1. `guard!(ffi_inventory)` is the enforcement mechanism: changes to the
+Rust inventory such as signatures, FFI record layouts or enum/discriminant shape
+regenerate bindings and change the API hash, and mismatched binaries fail
+immediately. Important native behavioral/layout changes not represented in the
+inventory must also change the guard salt.
 
 This means FFI records and enums do **not** need awkward reserved fields or a
 per-struct versioning protocol merely to preserve cross-package binary
@@ -515,9 +557,16 @@ bindings and all native engines are rebuilt and shipped together. Within one
 package version, however, every engine must have an identical FFI inventory and
 guard hash.
 
+A **generator projection change is different from a native ABI change**. The
+planned Interoptopus C# 15 union mode deliberately changes generated managed
+source while keeping the same `Unmanaged` layout and Rust inventory. That may
+leave the API-guard hash unchanged. Therefore the pinned Interoptopus revision,
+generated-source baseline and exact-toolchain compile gate are part of release
+validation; `guard!` alone cannot prove that the desired C# projection was used.
+
 **The hand-written managed API is the public compatibility contract.** Once
-stable, it follows SemVer independently of native churn. During the current
-pre-1.0 phase breaking changes are permitted by SemVer but must still be
+stable, it follows SemVer independently of native/generated churn. During the
+current pre-1.0 phase breaking changes are permitted by SemVer but must still be
 intentional and documented rather than accidental. Apply these rules now:
 
 - adding a new top-level method/type is normally additive;
@@ -529,46 +578,106 @@ intentional and documented rather than accidental. Apply these rules now:
 - public positional records have frozen constructor/deconstruction shape once
   exposed. Do not append positional fields later; use a new result type or a
   separate accessor when materially new data is needed;
-- closed public enums are treated as closed contracts. Adding a member can
-  break exhaustive consumer switches and therefore is not casually additive.
-  Use extensible strings/codes for open domains (`GixException.Code` is the
-  deliberate example), and use `[Flags]` only for domains explicitly
-  documented to tolerate new bits;
+- closed public enums **and public union/sum types** are closed contracts. Adding
+  a member/case can break exhaustive consumer switches and is therefore not
+  casually additive. Use extensible strings/codes for open domains
+  (`GixException.Code` is the deliberate example), and use `[Flags]` only for
+  domains explicitly documented to tolerate new bits;
 - `GixException` remains one class. Adding diagnostic/actionable properties is
   additive; changing the meaning of an existing `Kind` is breaking. Keep the
   small `Kind` taxonomy stable and grow exact reasons through `Code`;
-- generated Interoptopus resources remain internal so native ABI evolution
-  never leaks directly into consumer signatures.
+- generated Interoptopus resources, including generated union `*Case` types,
+  remain internal so native/generator evolution never leaks directly into
+  consumer signatures.
 
-Release validation needs two independent gates:
+Release validation needs three independent gates:
 
 1. **native profile equivalence:** build every native engine for a representative
-   RID and prove the same generated inventory / guard hash, then load each with
+   RID and prove the same Interoptopus inventory / guard hash, then load each with
    the same generated C# and verify its advertised capabilities;
-2. **managed public-API compatibility:** compare the hand-written public surface
-   against an approved baseline and separately flag changes to closed enums and
-   positional record shapes. The exact checker may be ApiCompat,
-   PublicApiAnalyzer or an equivalent deterministic snapshot; the required
-   policy above is the contract, not a particular tool.
+2. **generated projection/toolchain:** pin the Interoptopus revision and generator
+   mode, regenerate deterministically, and compile the generated bindings with
+   the exact .NET 11 / C# 15 preview toolchain used by GixSharp;
+3. **managed public-API compatibility:** compare the hand-written public surface
+   against an approved baseline and separately flag changes to closed enums,
+   public union case sets and positional record shapes. The exact checker may be
+   ApiCompat, PublicApiAnalyzer or an equivalent deterministic snapshot; the
+   required policy above is the contract, not a particular tool.
 
-`guard!` therefore solves exact native pairing, not public SemVer. Conversely,
-managed SemVer does not require keeping old native layouts alive. Keeping those
-boundaries separate is what makes hundreds of future FFI additions tractable.
+`guard!` therefore solves exact native pairing, not public SemVer or generator
+projection correctness. Conversely, managed SemVer does not require keeping old
+native/generated layouts alive. Keeping those boundaries separate is what makes
+hundreds of future FFI additions tractable.
+### Interoptopus enum / C# 15 union dependency - planned, not landed
+
+The GixSharp architecture now assumes the direction documented in the local
+Interoptopus `docs/csharp-unions.md`, but that document currently says **plan,
+not approved** and identifies its discriminant Step 0 as blocking. Treat this
+as an external prerequisite/direction, not as code that already exists.
+
+The parts GixSharp relies on are:
+
+- **Correct discriminants first.** Interoptopus currently stores an explicit tag
+  only on unit variants and reconstructs tuple-variant tags positionally in the
+  C# model. The plan requires one authoritative native discriminant for every
+  variant; its current recommendation is a `tag` field on `Variant`, but that
+  Step 0 shape is still marked open. Do not finalize new discriminated GixSharp
+  ABI around today's tuple-tag behavior.
+- **Custom `[Union]`, not the C# `union` keyword.** The planned C# backend keeps
+  the existing managed tag/payload storage and native `Unmanaged` layout, then
+  adds C# 15 union behavior through nested `*Case` types, `IUnion`, `Value`,
+  `HasValue` and `TryGetValue`. The native ABI stays unchanged.
+- **Default/invalid state is managed-only.** Struct-backed generated enums gain
+  a managed `_hasValue` bit; `default(E)` is empty and cannot be marshalled to
+  Rust. Class-backed enums have no empty non-null instance. Unknown native tags
+  remain interop corruption and must fail during conversion.
+- **Projection is opt-in and target-sensitive.** Flag-off output remains
+  byte-identical for existing/net10 consumers. GixSharp already targets .NET 11
+  preview, so once the feature lands and its generator tests are green,
+  GixSharp should enable the union projection for its generated bindings rather
+  than design new managed code around the legacy generated `IsX` / `AsX`
+  ergonomics.
+- **Initial scope is plain `DataEnum`.** `ffi::Option` / `ffi::Result` are
+  explicitly deferred in the Interoptopus plan. GixSharp must therefore keep
+  its hand-written public result/error translation independent of generated
+  `Result` ergonomics. Plain internal detail/state enums may consume the first
+  union projection; `Option` / `Result` can converge later without changing the
+  public managed contract.
+- **Generated cases are output-only.** Nested case types stay with the parent
+  generated enum, have no FFI `TypeId`, and remain internal under rule 8. Do not
+  expose them from public GixSharp signatures.
+
+GixSharp will **wait rather than create a temporary competing sum-type layer**.
+If a planned API naturally wants a closed data enum but would currently require
+representation boilerplate solely because of Interoptopus limitations, defer
+that final ABI shape until the relevant generic support is available. This does
+not block independent work such as P0a byte streaming or semantic classification
+of the P0b error envelope.
+
+`guard!(ffi_inventory)` does not validate C# projection quality when the Rust
+inventory is unchanged. Union projection deliberately changes generated managed
+source while preserving the native ABI/hash. Therefore two independent checks
+are required once GixSharp enables it: the normal native API guard, plus a pinned
+Interoptopus/generated-source build gate that compiles the generated bindings
+under the exact .NET 11 / C# 15 preview toolchain. The Interoptopus plan owns
+compiler-facing union tests; GixSharp only needs to verify its generated bindings
+and hand-written translation compile and behave against the pinned fork.
 ## Open architecture questions - priority order
 
 Feature/build profiles and ABI evolution are no longer open architecture
-questions; their contracts are fixed in the section above. The remaining open
-questions are:
+questions; their contracts are fixed above. The Interoptopus enum/union work is
+an external implementation prerequisite with a documented direction, not a new
+GixSharp sum-type design question. The remaining open questions are:
 
 | Priority | Open question | What must be decided |
 |---:|---|---|
 | **P0a** | **Byte-stream data plane** | Benchmark caller-buffer pull, scoped view/callback and chunked `Vec<u8>` transfer against both a large materialised blob and a genuinely streaming gix `Read` source. Freeze the byte ABI only after throughput, allocations, copies, peak memory and cancellation/disposal are understood. Caller-buffer pull is the leading design. |
-| **P0b** | **Error ABI** | Make the one intentional cross-cutting taxonomy break before breadth or cursor error semantics are frozen. Keep one public `GixException`; replace the payload enum with a composite error envelope; define small semantic `Kind`, extensible ASCII `Code`, orthogonal retryability, diagnostic-only message, selective typed detail, and centralized exhaustive classification. |
-| **P0c** | **Structured cursors** | With the stream lifecycle constrained by P0a and the error envelope fixed by P0b, freeze bounded batched managed pull, direct-vs-producer/channel adaptation, item-error vs terminal-failure semantics, final outcomes, single-consumer behaviour and automated ownership-closed payload enforcement. Preserve eager managed convenience methods as materializers over streaming where compatibility warrants it. |
+| **P0b** | **Error ABI** | Freeze the semantic envelope now: one public `GixException`, small semantic `Kind`, extensible ASCII `Code`, orthogonal retryability, diagnostic-only message and selective typed recovery detail. Keep the envelope independent of generated `Result` ergonomics; implement the final closed structured-detail ABI against the planned Interoptopus discriminant fix/C# 15 `DataEnum` union projection rather than today's `IsX`/`AsX` representation. |
+| **P0c** | **Structured cursors** | With the stream lifecycle constrained by P0a and the error envelope fixed by P0b, freeze bounded batched managed pull, direct-vs-producer/channel adaptation, item-error vs terminal-failure semantics, final outcomes, single-consumer behaviour and automated ownership-closed payload enforcement. Preserve eager managed convenience methods as materializers over streaming where compatibility warrants it. Closed item/outcome states should use Rust data enums once the generator support is available, not nullable-field bags. |
 | **P1** | **Stateful resources / transactions** | Index editing, refs/config transactions, worktree mutation, writers/editors and reusable diff caches need explicit ownership, service-vs-method boundaries, disposal and commit/rollback rules. This can be designed per affected API family rather than changing every existing operation. |
 | **P2** | **Callbacks, progress, cancellation, credentials** | Network and long-running operations need a single policy for managed callbacks, worker-thread invocation, reentrancy, cancellation and managed-exception propagation. Managed callbacks should not become the default record- or byte-stream transport merely because Interoptopus supports them. |
 | **P3** | **Filesystem paths vs Git bytes** | Git names/messages remain byte-faithful. OS filesystem paths need a separate platform-faithful representation and conversion policy. |
-| **P4** | **Interoptopus supportability** | No cursor/stream primitive exists today; missing `builtins_vec!` validation and the lack of a green C# snapshot baseline are maintenance risks. Prove gix-specific shapes before promoting new generic Interoptopus abstractions. |
+| **P4** | **Interoptopus supportability** | The current fork still has no cursor/stream primitive, snapshot baseline issue `ccb105a2` gates template review, and `docs/csharp-unions.md` still marks the discriminant fix as blocking/not approved. Consume those generic fixes rather than duplicating them in GixSharp, then prove gix-specific cursor shapes before promoting any additional generic Interoptopus abstraction. |
 
 
 ## Next step
@@ -580,35 +689,43 @@ high-coupling boundary work in this order:
 1. **P0a byte streams:** prototype the three transfer shapes on a large blob
    and on a genuinely streaming gix `Read` source; measure throughput,
    allocations, copies, peak native/managed memory, call count and
-   cancellation/disposal. Caller-buffer pull is the leading design.
-2. **P0b error ABI:** replace the current payload-enum error with the composite
-   envelope, freeze semantic `Kind` categories and the extensible `Code`
-   convention, expose retryability separately, map the current read/write
-   failure modes exhaustively, and preserve one public `GixException`. Include
-   `Unsupported` as the defensive native representation of a missing build
-   capability, while the managed layer preflights known absence as
-   `NotSupportedException`. Add tests for actionable cases such as object-kind
-   mismatch, conflicted index, empty-commit refusal, reference lock contention
-   and reference-out-of-date; no test or managed branch should depend on
-   parsing diagnostic messages.
-3. **P0c structured cursors:** with both stream lifecycle and error semantics
-   fixed, replace the native eager `rev_walk` precedent with a bounded-batch
-   cursor and exercise the same managed contract against `dirwalk` or `status`.
-   Keep the existing managed `RevWalk(...)` as a materialising convenience over
-   the streaming implementation rather than breaking its public signature.
-4. add automated ownership-closure enforcement for stream/cursor payloads.
-5. **Install compatibility/profile infrastructure before breadth accelerates:**
+   cancellation/disposal. Caller-buffer pull is the leading design. This work
+   is independent of the Interoptopus enum/union plan and can proceed now.
+2. **Consume the Interoptopus enum prerequisite instead of building a GixSharp
+   workaround:** wait for the discriminant Step 0 and opt-in plain-`DataEnum`
+   C# 15 custom-union projection described by `docs/csharp-unions.md`, with the
+   Interoptopus snapshot baseline repaired and a flag-on generated-C# compile
+   fixture green. Pin that fork revision and enable the union projection in
+   GixSharp's generation path. Do not add a temporary parallel sum-type layer.
+3. **P0b error ABI:** with the generator prerequisite available, implement the
+   semantic envelope, freeze `Kind` categories and the extensible `Code`
+   convention, expose retryability separately, and model only actionable
+   recovery detail as an internal closed data enum. Preserve one public
+   `GixException`. Include `Unsupported` as the defensive native representation
+   of a missing build capability, while the managed layer preflights known
+   absence as `NotSupportedException`. Add tests for object-kind mismatch,
+   conflicted index, empty-commit refusal, reference lock contention and
+   reference-out-of-date; no test or managed branch should parse diagnostics.
+4. **P0c structured cursors:** with stream lifecycle and error semantics fixed,
+   replace the native eager `rev_walk` precedent with a bounded-batch cursor and
+   exercise the same managed contract against `dirwalk` or `status`. Keep the
+   existing managed `RevWalk(...)` as a materialising convenience over the
+   streaming implementation. Use Rust data enums for genuinely closed
+   item/outcome states where appropriate; do not invent nullable-field bags.
+5. add automated ownership-closure enforcement for stream/cursor payloads.
+6. **Install compatibility/profile infrastructure before breadth accelerates:**
    make the shared gix feature set explicit with both hash algorithms; add the
    runtime capability bootstrap; establish the managed public-API baseline;
-   and add a profile-equivalence validation that requires every released native
-   engine to produce the same Interoptopus inventory/API-guard hash. The second
-   physical native engine and generalized RID staging must exist before the
-   first profile-specific/network surface is considered complete.
-6. **P1 stateful resources:** settle service-vs-method ownership plus
+   add the pinned-generator/exact-toolchain compile gate; and add a
+   profile-equivalence validation requiring every released native engine to
+   produce the same Interoptopus inventory/API-guard hash. The second physical
+   native engine and generalized RID staging must exist before the first
+   profile-specific/network surface is considered complete.
+7. **P1 stateful resources:** settle service-vs-method ownership plus
    commit/rollback/disposal rules before expanding index/ref/config/worktree
    mutation families.
-7. then resume breadth module by module, pairing each Rust facade addition
-   with its managed wrapper and tests and keeping rules 8-10 green.
+8. then resume breadth module by module, pairing each Rust facade addition with
+   its managed wrapper and tests and keeping rules 8-11 green.
 
 The target remains **full gix coverage**: the managed/FFI surface represents
 the union of the declared native-profile capabilities, not one impossible
@@ -619,12 +736,24 @@ decision, not the architecture for iteration or bulk data.
 
 ## Also outstanding
 
-- Issue `f7bf7635`: `build.rs` asserting the interoptopus patch is active.
-- Upstream the interoptopus `validate()` fix (`2a6da76a`) and the `Vec<T>`
-  accessors. A PR also tests whether that project is responsive, which is
-  the parked fork-or-revive question.
-- interoptopus snapshots (`ccb105a2`) - no green baseline means template
-  changes cannot be validated.
+- Issue `f7bf7635`: `build.rs` asserting the pinned local Interoptopus patch is
+  active.
+- Interoptopus `docs/csharp-unions.md`: current status is **plan, not approved**.
+  Its Step 0 discriminant-model fix is blocking the planned opt-in plain
+  `DataEnum` C# 15 custom-union projection. GixSharp intentionally waits for
+  this generic work rather than creating a parallel wrapper-enum architecture.
+- Interoptopus snapshot baseline issue `ccb105a2`: template changes cannot be
+  reviewed reliably until the failing snapshot drift is repaired. The union
+  plan also requires a flag-on net11 / `LangVersion=preview` generated-C#
+  compile fixture; native API guard coverage is not sufficient because the
+  union projection preserves the native ABI/hash.
+- The existing Interoptopus `validate()` fix (`2a6da76a`) and `Vec<T>` accessors
+  remain local-fork dependencies until their upstream/fork disposition is
+  settled.
+- `ffi::Option` / `ffi::Result` union projection is explicitly deferred by the
+  current Interoptopus plan. Keep GixSharp's public managed result/error
+  translation independent of that generated ergonomics so it can converge
+  later without a public API break.
 - Parked, unrelated to the bridge: `gix-ref` reflog creates directories and
   an empty file BEFORE validating the committer, leaving debris on a pure
   validation failure. `gix-ref/src/store/file/loose/reflog.rs` ~119-153.
