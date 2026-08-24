@@ -47,18 +47,43 @@ public class RepoTests
         return Repo.Open(bytes);
     }
 
+    private static Repo OpenSelf() => Open(RepositoryRoot());
+
+    /// <summary>
+    /// Decodes a Rust-owned byte vector as UTF-8 and disposes it.
+    /// </summary>
+    private static string Text(VecByte bytes)
+    {
+        using (bytes)
+        {
+            return Encoding.UTF8.GetString(bytes.ToArray());
+        }
+    }
+
+    /// <summary>
+    /// Reads the hex id that HEAD resolves to, as a managed string.
+    ///
+    /// Deliberately does not hand back the Utf8String: passing one as an
+    /// argument MOVES it (the marshaller calls IntoUnmanaged, transferring
+    /// the pointer to Rust and nulling the managed side), so a single
+    /// Utf8String cannot be both read and passed. Managed callers should
+    /// hold the decoded string and build a fresh Utf8String per call.
+    /// </summary>
+    private static string HeadTarget(Repo repo)
+    {
+        using var head = repo.Head();
+        return head.target.String;
+    }
+
     [Test]
     public async Task Open_ResolvesGitDirectory()
     {
-        using var repo = Open(RepositoryRoot());
+        using var repo = OpenSelf();
 
-        using var raw = repo.GitDir();
-        var gitDir = Encoding.UTF8.GetString(raw.ToArray());
+        var gitDir = Text(repo.GitDir());
 
         // Deliberately not asserting the path ends in ".git": in a linked
         // worktree gix correctly resolves to <main>/.git/worktrees/<name>.
-        // Asserting an existing, absolute, .git-containing path holds for
-        // both a normal clone and a worktree.
         await Assert.That(gitDir).IsNotEmpty();
         await Assert.That(gitDir).Contains(".git");
         await Assert.That(Path.IsPathRooted(gitDir)).IsTrue();
@@ -68,7 +93,7 @@ public class RepoTests
     [Test]
     public async Task Open_ReportsNonBareWorkingTree()
     {
-        using var repo = Open(RepositoryRoot());
+        using var repo = OpenSelf();
 
         await Assert.That((bool)repo.IsBare()).IsFalse();
     }
@@ -90,5 +115,67 @@ public class RepoTests
         {
             temp.Delete(recursive: true);
         }
+    }
+
+    [Test]
+    public async Task Head_ResolvesToBornCommitOnABranch()
+    {
+        using var repo = OpenSelf();
+
+        using var head = repo.Head();
+
+        await Assert.That((bool)head.is_unborn).IsFalse();
+
+        // A full sha1 object id in hex.
+        await Assert.That(head.target.String.Length).IsEqualTo(40);
+
+        // The test runs from a checkout on a branch, so HEAD is symbolic.
+        await Assert.That((bool)head.is_detached).IsFalse();
+        await Assert.That(Text(head.referent)).StartsWith("refs/");
+    }
+
+    [Test]
+    public async Task RevWalk_FromHead_IsBoundedAndStartsAtHead()
+    {
+        using var repo = OpenSelf();
+        var tip = HeadTarget(repo);
+
+        using var ids = repo.RevWalk(tip.Utf8(), 5);
+
+        await Assert.That(ids.Count).IsGreaterThan(0);
+        await Assert.That(ids.Count).IsLessThanOrEqualTo(5);
+
+        // A walk starts at its tip.
+        await Assert.That(ids[0].String).IsEqualTo(tip);
+    }
+
+    [Test]
+    public async Task CommitInfo_RoundTripsHeadCommit()
+    {
+        using var repo = OpenSelf();
+        var tip = HeadTarget(repo);
+
+        using var commit = repo.CommitInfo(tip.Utf8());
+
+        await Assert.That(commit.id.String).IsEqualTo(tip);
+        await Assert.That(Text(commit.author_name)).IsNotEmpty();
+        await Assert.That(Text(commit.message)).IsNotEmpty();
+
+        // gitoxide's history predates this test but is not in the future.
+        await Assert.That(commit.time_seconds).IsGreaterThan(1_000_000_000L);
+        await Assert.That(commit.time_seconds)
+                    .IsLessThan(DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 86_400);
+    }
+
+    /// <summary>
+    /// Malformed object ids must be rejected before reaching gix.
+    /// </summary>
+    [Test]
+    public async Task CommitInfo_InvalidId_Throws()
+    {
+        using var repo = OpenSelf();
+
+        await Assert.That(() => repo.CommitInfo("not-a-valid-object-id".Utf8()))
+                    .Throws<Exception>();
     }
 }
