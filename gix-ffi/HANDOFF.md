@@ -1,8 +1,8 @@
 # gix-ffi / GixSharp — Handoff
 
-State as of 2026-08-25. Implemented-surface union audit against `main` at
-`0978c580f8e42d6f3ea53df06df12d9be1bfe636` and the local Interoptopus
-`docs/csharp-unions.md` plan.
+State as of 2026-08-25. P0a streaming and implemented-surface union audit
+against `main` at `61739044966d033186908aa4ef25157ff981d7a6` and the local
+Interoptopus `docs/csharp-unions.md` plan.
 
 ## What this is
 
@@ -285,65 +285,69 @@ serialising unrelated calls.
 
 ## P0 - boundary contracts before breadth
 
-Full coverage now has three high-coupling boundary decisions that must be
-settled before broad surface expansion: bulk-byte transfer, the error contract,
-and structured cursors. Resolve them in that order. Byte streaming constrains
-the shared stream lifecycle; the error contract then has to exist before cursor
-item/terminal error semantics are frozen.
+Full coverage has three high-coupling boundary decisions. **P0a byte streaming
+is now experimentally resolved**; its selected pull/lifetime contract constrains
+the shared stream lifecycle. P0b error semantics and P0c structured cursors remain
+to be frozen before broad surface expansion.
 
-### P0a - byte streams first
+### P0a - byte streams first - experimentally resolved
 
-Bulk byte streams include blobs, large patches, archives, pack/network content,
-filter output and similar data. `ffi::Vec<u8>` is not the general solution:
-it materialises the whole payload in Rust-owned memory and `ToArray()` copies
-it again into managed memory. That is acceptable for small Git byte strings,
-not for large content.
+P0a is resolved at the **boundary-contract level** by commit
+`61739044966d033186908aa4ef25157ff981d7a6`. The implementation, methodology and
+raw evidence are committed in `P0A_BYTE_STREAMING.md` and
+`P0A_BYTE_STREAMING_RESULTS.md`. Keep the implementation experimental/gix-specific
+for now, but use this contract for future bulk-byte APIs unless a qualitatively
+different source disproves it.
 
-Interoptopus already supports `ffi::SliceMut<T>` as a borrowed mutable slice.
-The generated C# pins a managed array and passes pointer + length without an
-FFI copy, so caller-buffer pull is viable at the ABI boundary.
+The selected contract is:
 
-There is an important gix constraint: ordinary object lookup is currently
-`Find::try_find(id, &mut Vec<u8>)`. Loose-object lookup resizes that `Vec` to
-the full decompressed size, and packed/delta decoding is also built around
-`Vec<u8>` result/scratch buffers. Therefore caller-buffer blob reads are not
-end-to-end zero-copy today: gix still materialises the decoded object in Rust,
-but caller-buffer pull removes the second full Rust-to-managed allocation and
-copy and keeps the managed API compatible with genuinely streaming sources.
+- **stateful native reader + caller-owned reusable managed buffer**;
+- `ffi::SliceMut<u8>` for the synchronous pull, exposed managed-side with
+  `Stream.Read(Span<byte>)` semantics; the managed pointer is valid only for that
+  call and native code never retains it;
+- one native-to-managed boundary copy per non-empty pull and no whole-payload
+  managed copy;
+- a non-empty read returning zero is EOF; a zero-length read returning zero is
+  **not** an EOF probe; repeated reads after real EOF are stable;
+- stateful/single-consumer ownership with managed serialization of read/dispose;
+  disposal is deterministic and idempotent, and the reader owns its source
+  independently of the repository after construction;
+- cancellation is cooperative **between** pulls: pre-cancel makes zero FFI calls,
+  while an already-running synchronous native read is not interruptible;
+- length is optional metadata when cheaply known, not part of the pull protocol.
 
-The leading byte-stream contract is therefore a stateful native reader with a
-caller-owned reusable buffer, exposed managed-side as `Stream.Read(Span<byte>)`
-semantics or equivalent. EOF is learned by reading to exhaustion; known length
-may be exposed as metadata when cheap, but the protocol does not require a
-size-query/read two-call dance.
+The reproducible Release benchmark used a deterministic ~64 MiB payload and one
+reused 64 KiB managed buffer:
 
-Three transfer shapes should still be measured before the byte ABI is frozen:
+| Source | Median open | Median pull | Pull throughput | FFI calls to EOF | Pull allocations | Exact reader-retained native payload |
+|---|---:|---:|---:|---:|---:|---:|
+| Materialized object | 14.404 ms | 3.302 ms | 19,382.9 MiB/s | 1,026 | 41,040 B | 64.00 MiB |
+| Worktree pipe `Read` | 0.673 ms | 104.973 ms | 609.7 MiB/s | 1,026 | 41,040 B | 0 B |
 
-- **Caller-supplied buffer** - preferred direction. Works with existing gix
-  materialised blobs and can become direct streaming when the underlying gix
-  source implements `Read`.
-- **Scoped callback/view** - can expose an already-materialised Rust buffer to
-  managed code without another bulk copy, but introduces reverse P/Invoke,
-  strict scoped lifetime, reentrancy and managed-exception concerns. Keep as a
-  possible specialised fast path, not the default stream model.
-- **Chunked `Vec<u8>` cursor** - unifies the `next()` shape mechanically but
-  adds chunk allocation/copying and prevents direct use of caller-owned
-  reusable buffers. Do not adopt it as the default merely for API uniformity.
+Interpret those numbers precisely. The materialized-object pull rate is a hot
+in-memory copy after gix has already opened/decompressed the object, so open time
+matters for end-to-end access. The worktree reader retains no whole output, but
+process-private memory still rose by about 64 MiB and source inspection shows
+`gix_worktree_stream` currently materializes each large entry into a `Vec<u8>`
+upstream before pipe output. Thus the ABI preserves streaming/backpressure and
+removes the second whole-payload managed allocation, but it is **not an
+end-to-end zero-copy or constant-memory claim about current gix internals**.
 
-Benchmark in two distinct scenarios so gix materialisation is not confused
-with FFI cost:
+The 41,040 B pull allocation is 1,026 generated `ResultUlongGixError` objects at
+40 B per FFI call. Do not distort the stream contract to remove that allocation;
+revisit it with the Interoptopus error/`Result` union work.
 
-1. a large blob: compare whole `ffi::Vec<u8>` + managed copy, caller-buffer
-   pull from a materialised native blob, scoped view/callback, and chunked
-   `Vec<u8>` transfer;
-2. a genuinely streaming gix source such as `gix-worktree-stream::Entry` (or
-   another `Read`-based path): compare caller-buffer pull against callback and
-   chunked transfer to verify that the ABI preserves real native streaming.
+Alternatives were evaluated and are not the default:
 
-The decision criterion is not only throughput. Measure peak native memory,
-peak managed memory, allocations, copies, call count and cancellation/disposal
-behaviour. The managed contract must not encode today's ODB materialisation if
-that implementation can improve later.
+- scoped callback/borrowed view can avoid a copy for specialized synchronous
+  consumers, but its lifetime, reentrancy and managed-exception constraints make
+  it a poor general `Stream` surface;
+- chunked `Vec<u8>` cursors add per-chunk ownership/allocation/copying and are a
+  fallback for coarse paging, not sustained byte streaming.
+
+Do **not** generalize this into an Interoptopus-wide stream primitive yet. The
+gix-specific prototype is sufficient to freeze P0a and to inform P0c lifecycle
+semantics.
 
 ### P0b - error ABI before cursors
 
@@ -852,7 +856,6 @@ GixSharp sum-type design question. The remaining open questions are:
 
 | Priority | Open question | What must be decided |
 |---:|---|---|
-| **P0a** | **Byte-stream data plane** | Benchmark caller-buffer pull, scoped view/callback and chunked `Vec<u8>` transfer against both a large materialised blob and a genuinely streaming gix `Read` source. Freeze the byte ABI only after throughput, allocations, copies, peak memory and cancellation/disposal are understood. Caller-buffer pull is the leading design. |
 | **P0b** | **Error ABI** | Freeze the semantic envelope now: one public `GixException`, small semantic `Kind`, extensible ASCII `Code`, orthogonal retryability, diagnostic-only message and selective typed recovery detail. Keep the envelope independent of generated `Result` ergonomics; implement the final closed structured-detail ABI against the planned Interoptopus discriminant fix/C# 15 `DataEnum` union projection rather than today's `IsX`/`AsX` representation. |
 | **P0c** | **Structured cursors** | With the stream lifecycle constrained by P0a and the error envelope fixed by P0b, freeze bounded batched managed pull, direct-vs-producer/channel adaptation, item-error vs terminal-failure semantics, final outcomes, single-consumer behaviour and automated ownership-closed payload enforcement. Preserve eager managed convenience methods as materializers over streaming where compatibility warrants it. Closed item/outcome states should use Rust data enums once the generator support is available, not nullable-field bags. |
 | **P1** | **Stateful resources / transactions** | Index editing, refs/config transactions, worktree mutation, writers/editors and reusable diff caches need explicit ownership, service-vs-method boundaries, disposal and commit/rollback rules. This can be designed per affected API family rather than changing every existing operation. |
@@ -863,16 +866,13 @@ GixSharp sum-type design question. The remaining open questions are:
 
 ## Next step
 
-The managed layer is done for the POC surface, so issue `99208883` is
-effectively closed. Do not resume broad surface expansion yet. Resolve the
-high-coupling boundary work in this order:
+The managed layer is done for the POC surface, issue `99208883` is effectively
+closed, and **P0a is now closed at the boundary-contract level** by
+`61739044966d033186908aa4ef25157ff981d7a6`. Do not repeat the byte-stream
+prototype as prerequisite work and do not resume broad surface expansion yet.
+The remaining high-coupling work is:
 
-1. **P0a byte streams:** prototype the three transfer shapes on a large blob
-   and on a genuinely streaming gix `Read` source; measure throughput,
-   allocations, copies, peak native/managed memory, call count and
-   cancellation/disposal. Caller-buffer pull is the leading design. This work
-   is independent of the Interoptopus enum/union plan and can proceed now.
-2. **Consume the Interoptopus enum prerequisite instead of building a GixSharp
+1. **Consume the Interoptopus enum prerequisite instead of building a GixSharp
    workaround:** wait for the discriminant Step 0 and opt-in plain-`DataEnum`
    C# 15 custom-union projection described by `docs/csharp-unions.md`, with the
    Interoptopus snapshot baseline repaired and a flag-on generated-C# compile
@@ -884,7 +884,7 @@ high-coupling boundary work in this order:
    coarse `GixError` translation or the generated `Result*`/`.AsOk()` path at
    this stage: fold the former into P0b and re-audit the latter only when
    Interoptopus's deferred Result-union phase lands.
-3. **P0b error ABI:** with the generator prerequisite available, implement the
+2. **P0b error ABI:** with the generator prerequisite available, implement the
    semantic envelope, freeze `Kind` categories and the extensible `Code`
    convention, expose retryability separately, and model only actionable
    recovery detail as an internal closed data enum. Preserve one public
@@ -895,14 +895,15 @@ high-coupling boundary work in this order:
    Add tests for object-kind mismatch, conflicted index, empty-commit refusal,
    reference lock contention and reference-out-of-date; no test or managed
    branch should parse diagnostics.
-4. **P0c structured cursors:** with stream lifecycle and error semantics fixed,
-   replace the native eager `rev_walk` precedent with a bounded-batch cursor and
-   exercise the same managed contract against `dirwalk` or `status`. Keep the
-   existing managed `RevWalk(...)` as a materialising convenience over the
-   streaming implementation. Use Rust data enums for genuinely closed
-   item/outcome states where appropriate; do not invent nullable-field bags.
-5. add automated ownership-closure enforcement for stream/cursor payloads.
-6. **Install compatibility/profile infrastructure before breadth accelerates:**
+3. **P0c structured cursors:** with the proven P0a reader lifecycle and P0b error
+   semantics fixed, replace the native eager `rev_walk` precedent with a
+   bounded-batch cursor and exercise the same managed contract against `dirwalk`
+   or `status`. Keep the existing managed `RevWalk(...)` as a materialising
+   convenience over the streaming implementation. Use Rust data enums for
+   genuinely closed item/outcome states where appropriate; do not invent
+   nullable-field bags.
+4. add automated ownership-closure enforcement for stream/cursor payloads.
+5. **Install compatibility/profile infrastructure before breadth accelerates:**
    make the shared gix feature set explicit with both hash algorithms; add the
    runtime capability bootstrap; establish the managed public-API baseline and
    record the `GixHead` sum-type redesign as a known approved pre-1.0 break;
@@ -911,7 +912,7 @@ high-coupling boundary work in this order:
    produce the same Interoptopus inventory/API-guard hash. The second physical
    native engine and generalized RID staging must exist before the first
    profile-specific/network surface is considered complete.
-7. **Remove the known public sentinel sum type before API stabilization:** once
+6. **Remove the known public sentinel sum type before API stabilization:** once
    the needed generic rich-enum support is available, replace `HeadInfo`'s
    target/referent/boolean encoding and the public positional `GixHead` record
    with the closed HEAD-state model described above. Treat the baseline change
@@ -920,10 +921,10 @@ high-coupling boundary work in this order:
    reason to convert ordinary scalar enums or flags to unions. The later
    `ffi::Option` and `ffi::Result` migrations remain internal cleanup checkpoints
    and preserve their already-correct public nullable/exception contracts.
-8. **P1 stateful resources:** settle service-vs-method ownership plus
+7. **P1 stateful resources:** settle service-vs-method ownership plus
    commit/rollback/disposal rules before expanding index/ref/config/worktree
    mutation families.
-9. then resume breadth module by module, pairing each Rust facade addition with
+8. then resume breadth module by module, pairing each Rust facade addition with
    its managed wrapper and tests and keeping rules 8-11 green.
 
 The target remains **full gix coverage**: the managed/FFI surface represents
