@@ -622,60 +622,96 @@ Release validation needs three independent gates:
 projection correctness. Conversely, managed SemVer does not require keeping old
 native/generated layouts alive. Keeping those boundaries separate is what makes
 hundreds of future FFI additions tractable.
-### Interoptopus enum / C# 15 union dependency - planned, not landed
+### Interoptopus enum / C# 15 union dependency - partially landed
 
-The GixSharp architecture now assumes the direction documented in the local
-Interoptopus `docs/csharp-unions.md`, but that document currently says **plan,
-not approved** and identifies its discriminant Step 0 as blocking. Treat this
-as an external prerequisite/direction, not as code that already exists.
+Steps 0, 1 and 2 of the Interoptopus `docs/csharp-unions.md` plan are landed, and so is the
+first piece of Step 3. GixSharp is blocked on the rest of Steps 3-5. Earlier revisions of this
+section said "plan, not approved" with Step 0 blocking - that quoted the plan's own header,
+which was stale and has since been corrected.
 
-The parts GixSharp relies on are:
+Landed:
 
-- **Correct discriminants first.** Interoptopus currently stores an explicit tag
-  only on unit variants and reconstructs tuple-variant tags positionally in the
-  C# model. The plan requires one authoritative native discriminant for every
-  variant; its current recommendation is a `tag` field on `Variant`, but that
-  Step 0 shape is still marked open. Do not finalize new discriminated GixSharp
-  ABI around today's tuple-tag behavior.
-- **Custom `[Union]`, not the C# `union` keyword.** The planned C# backend keeps
-  the existing managed tag/payload storage and native `Unmanaged` layout, then
-  adds C# 15 union behavior through nested `*Case` types, `IUnion`, `Value`,
-  `HasValue` and `TryGetValue`. The native ABI stays unchanged.
-- **Default/invalid state is managed-only.** Struct-backed generated enums gain
-  a managed `_hasValue` bit; `default(E)` is empty and cannot be marshalled to
-  Rust. Class-backed enums have no empty non-null instance. Unknown native tags
-  remain interop corruption and must fail during conversion.
-- **Projection is opt-in and target-sensitive.** Flag-off output remains
-  byte-identical for existing/net10 consumers. GixSharp already targets .NET 11
-  preview, so once the feature lands and its generator tests are green,
-  GixSharp should enable the union projection for its generated bindings rather
-  than design new managed code around the legacy generated `IsX` / `AsX`
-  ergonomics.
-- **Initial scope is plain `DataEnum`.** `ffi::Option` / `ffi::Result` are
-  explicitly deferred in the Interoptopus plan. GixSharp must therefore keep
-  its hand-written public result/error translation independent of generated
-  `Result` ergonomics. Plain internal detail/state enums may consume the first
-  union projection; `Option` / `Result` can converge later without changing the
-  public managed contract.
-- **Generated cases are output-only.** Nested case types stay with the parent
-  generated enum, have no FFI `TypeId`, and remain internal under rule 8. Do not
-  expose them from public GixSharp signatures.
+- **Correct discriminants** (`c928d53e`). `tag` is a field on `Variant`, unconditional and
+  independent of payload shape; `VariantKind` is `Unit` / `Tuple(TypeId)`, a pure payload
+  descriptor. The proc macro resumes implicit discriminants across payload variants, and the
+  three sites that substituted the positional index are fixed. `Issues.md` `09b82d44` closed.
+  The API hash changed, so bindings must be regenerated.
+- **Collision-safe naming.** A `union_names` model pass resolves a `stem` and a `case_type` per
+  variant, preservation-biased: existing emitted names are kept and only new case types move on
+  collision. Reference-project output was byte-identical.
+- **net11 / `LangVersion=preview` retarget** (`9d664613`).
+- **Struct-backed `_hasValue`** (`8c70868d`) - plan item 3. The field is emitted but nothing
+  reads it yet, so it currently trips **CS0169: never used** on every carrier.
 
-GixSharp will **wait rather than create a temporary competing sum-type layer**.
-If a planned API naturally wants a closed data enum but would currently require
-representation boilerplate solely because of Interoptopus limitations, defer
-that final ABI shape until the relevant generic support is available. This does
-not block independent work such as P0a byte streaming or semantic classification
-of the P0b error envelope.
+Still pending, and the actual blocker: items 3a-3f (class constructor, nested case types,
+`Value`/`HasValue`/`TryGetValue`, `[Union]` + `IUnion`, case conversions, case accessibility),
+item 4 (empty-state guards, validated `ToManaged`, exception split), and item 5 (snapshots move
+once; the consumer projects compile the output).
 
-`guard!(ffi_inventory)` does not validate C# projection quality when the Rust
-inventory is unchanged. Union projection deliberately changes generated managed
-source while preserving the native ABI/hash. Therefore two independent checks
-are required once GixSharp enables it: the normal native API guard, plus a pinned
-Interoptopus/generated-source build gate that compiles the generated bindings
-under the exact .NET 11 / C# 15 preview toolchain. The Interoptopus plan owns
-compiler-facing union tests; GixSharp only needs to verify its generated bindings
-and hand-written translation compile and behave against the pinned fork.
+**Regenerating against the current fork today is not neutral.** `_hasValue` is already emitted,
+so a regenerated `Interop.cs` gains an unused field on every struct-backed generated enum and
+`Result` carrier, each raising CS0169. Check whether `GixSharp.csproj` or `Directory.Build.props`
+sets `TreatWarningsAsErrors` before pinning forward - if it does, the build breaks on a
+half-implemented feature. The warnings clear when item 3c lands and consumes the field. Waiting
+for 3c is the cheaper option; there is nothing in the interim state GixSharp needs.
+
+The parts GixSharp relies on:
+
+- **Custom `[Union]`, not the C# `union` keyword.** The backend keeps the existing managed
+  tag/payload storage and native `Unmanaged` layout, adding union behaviour on top. The native
+  ABI stays unchanged.
+- **Default/invalid state is managed-only.** Struct-backed generated enums carry a managed
+  `_hasValue` bit; `default(E)` is empty and cannot be marshalled to Rust. Class-backed enums
+  have no empty non-null instance. Unknown native tags remain interop corruption and must fail
+  during conversion.
+- **There is no opt-in flag.** `RustLibraryBuilder::unions(bool)` was designed and then dropped:
+  the fork targets net11 everywhere and unions are the default `DataEnum` projection. There is
+  no eligibility gate and no flag-off output to preserve. Adoption is "pin the revision and
+  regenerate", not "enable a switch".
+- **Scope is every `DataEnum`, including the `Option` / `Result` carriers.** They carry a
+  `DataEnum` inside a `TypePattern` and the Step 3/4 machinery is generic, so they are projected
+  in the same pass - `8c70868d` demonstrates it by emitting `_hasValue` on `ResultVoidError`,
+  `ResultVec3f32Error` and `ResultUintDotnetException`. What is deferred is only
+  `Result`-specific tidying: `IResult<T,E>` coexistence with case types, `AsOk` / `AsErr`,
+  `body_from_call` factory names. Earlier revisions described the projection itself as deferred;
+  that was wrong and sent the adoption plan down a wrong path.
+- **Generated cases are output-only.** Nested case types stay with the parent generated enum,
+  have no FFI `TypeId` - verified against the Interoptopus output router, which classifies only
+  registered `TypeId`s - and remain internal under rule 8. Do not expose them from public
+  GixSharp signatures.
+- **Two consequences are breaking and land together.** External `new EnumX()` stops compiling
+  for class-backed generated enums, and `default(ResultX)` becomes empty rather than `Ok`, so
+  `AsOk()` on a default `Result` throws the empty-state exception instead of surfacing as
+  `EnumException<E>`. Neither is currently relied on by hand-written `Managed/` code, but that
+  is a property of today's consumer, not a guarantee - verify both when regenerating.
+
+Two Interoptopus questions remain open and touch the generated shape GixSharp will consume:
+what accessibility nested case types get, and whether the compiler synthesises the case-to-enum
+conversion from `[Union]` or the generator must emit operators. Neither changes the adoption
+sequence.
+
+**Unrelated Interoptopus changes that moved the shared checkout.** The fork removed Git LFS
+entirely, stopped committing its plugin DLLs (they are built during `cargo test` by
+`define_plugin!`), and fixed CI to install the .NET 11 preview SDK on every OS rather than only
+Linux. None of this changes the generated bindings, but the local checkout at
+`C:/Users/mstar/source/repos/interoptopus` now requires a .NET 11 preview SDK to run its own
+tests, and `Issues.md` `1383b84b` (MCP transactions blocked by the LFS clean-filter bypass) is
+closed as a side effect.
+
+GixSharp will still **wait rather than create a temporary competing sum-type layer**. If a
+planned API naturally wants a closed data enum but would currently require representation
+boilerplate solely because of Interoptopus limitations, defer that final ABI shape until the
+relevant generic support exists. Named and multi-field Rust variants are still unsupported and
+explicitly out of scope for this projection - see the note under P0b.
+
+`guard!(ffi_inventory)` does not validate C# projection quality when the Rust inventory is
+unchanged. Union projection deliberately changes generated managed source while preserving the
+native ABI/hash. Two independent checks are therefore required: the normal native API guard,
+plus a pinned Interoptopus revision compiled under the exact .NET 11 / C# 15 preview toolchain.
+Interoptopus owns the compiler-facing union tests; GixSharp needs only to verify that its
+generated bindings and hand-written translation compile and behave against the pinned fork.
+
+
 ### Existing implementation migration when unions land
 
 The existing POC has been audited against the planned union projection so this
@@ -704,48 +740,64 @@ from native `ObjectMetadata`. Likewise, generated Result construction and
 empty/default and class-construction semantics are therefore generator migration
 concerns for the current surface, not public GixSharp source breaks.
 
-#### Plain `DataEnum` adoption - immediate internal migration
+#### Union adoption - immediate internal migration
 
-When plain `DataEnum` union projection becomes consumable:
+When Interoptopus Steps 3-5 are green:
 
-1. **Enable it in binding generation, not in the public API.**
-   `tests/generate_bindings.rs` currently builds `RustLibrary` without a union
-   option. Once the pinned Interoptopus revision exposes the planned builder
-   switch, enable it there and regenerate committed `bindings/Interop.cs`.
-   `GixSharp.csproj` and `GixSharp.Tests.csproj` are already `net11.0` with
-   `LangVersion=preview` and preview features enabled; no target-framework
-   migration is required.
-2. **Migrate the durable `FfiObjectType` consumer to union cases.**
-   `GixRepository.Objects.cs::ReadObjectType` currently tests `IsCommit`,
-   `IsTree`, `IsBlob` and `IsTag`. After union projection, consume
-   `CommitCase` / `TreeCase` / `BlobCase` / `TagCase` through C# pattern
-   matching and keep the hand-written public `GixObjectType` unchanged. This is
-   an internal generated-shape migration, not a public API change. The generator
-   itself owns the new empty/default struct state and native-tag validation.
-3. **Do not spend a standalone migration on the coarse `GixError`.** The planned
-   generator preserves legacy factories/checks/accessors, so enabling plain
-   unions does not require immediately rewriting the existing
-   `GixRepository.Translate` `IsX` / `AsX` switch. P0b is already scheduled to
-   replace this coarse seven-case ABI with the semantic error envelope; fold the
-   managed translation rewrite into that work instead of first modernising a
-   type that will immediately disappear. If an intermediate branch does use the
-   generated `GixError` cases, dispose the owning generated error exactly once;
-   do not separately dispose a payload obtained through a case view.
-4. **Strengthen rule 8's reflection test.** The existing
-   `ManagedRepositorySignatures_DoNotExposeGeneratedResources` test enumerates a
-   fixed set of generated top-level types and inspects only public
-   `GixRepository` method parameters/returns. Nested generated `*Case` types are
-   a new leak surface, and the final invariant also covers hand-written public
+1. **Pin the revision and regenerate. There is no switch to enable.**
+   `tests/generate_bindings.rs` builds `RustLibrary`; unions are the default
+   `DataEnum` projection in the pinned fork, so adoption is pinning that
+   revision and regenerating committed `bindings/Interop.cs`. Earlier revisions
+   of this list said to enable a builder option - `RustLibraryBuilder::unions(bool)`
+   does not exist and was deliberately abandoned. `GixSharp.csproj` and
+   `GixSharp.Tests.csproj` are already `net11.0` with `LangVersion=preview` and
+   preview features enabled; no target-framework migration is required.
+2. **Expect a large `Interop.cs` diff, and replace the diff-based health check.**
+   The documented sanity test - a clean `git diff --stat bindings/Interop.cs`
+   after regenerating proves the local interoptopus patch is active - stops
+   working the moment projection lands, because the projection legitimately
+   rewrites generated managed source. Replace it with a check that survives:
+   the API-guard hash plus a compile of the regenerated bindings. See Commands.
+3. **Audit the generated `Result*` paths in the same transaction.** `Result`
+   carriers are projected in this pass, not a later one. The surface is twelve
+   `Result*GixError` wrapper classes and 22 generated `Repo` methods reaching
+   native results through `.AsOk()`. Confirm that a native `Err` still arrives at
+   the one hand-written `GixException` translation boundary with owned error data
+   intact, that payloads are disposed exactly once, that generated `Panic` / `Null`
+   states remain distinguishable from ordinary `Err`, and that the new empty
+   `default(ResultX)` is never mistaken for `Ok`. There are no hand-written
+   managed `.AsOk()` / `.AsErr()` calls today, so this is verification, not rewriting.
+4. **Migrate the `FfiObjectType` consumer - as a smoke test, not for its own sake.**
+   `GixRepository.Objects.cs::ReadObjectType` tests `IsCommit` / `IsTree` /
+   `IsBlob` / `IsTag`. Switching it to case matching buys nothing semantically on a
+   payload-free type, and public `GixObjectType` stays a plain `enum` either way.
+   Its value is that it exercises the new generated shape against a real consumer.
+   Do it for that reason or skip it deliberately; do not present it as an
+   ergonomic improvement.
+5. **Do not spend a standalone migration on the coarse `GixError`.** The generator
+   preserves legacy factories, checks and accessors, so enabling unions does not
+   require rewriting the existing `GixRepository.Translate` `IsX` / `AsX` switch.
+   P0b replaces this coarse seven-case ABI anyway; fold the managed translation
+   rewrite into that work rather than modernising a type that will disappear. If
+   an intermediate branch does use the generated `GixError` cases, dispose the
+   owning generated error exactly once and do not separately dispose a payload
+   obtained through a case view.
+6. **Strengthen rule 8's reflection test - before adoption, not after.**
+   `ManagedRepositorySignatures_DoNotExposeGeneratedResources` enumerates a fixed
+   set of generated top-level types and inspects only public `GixRepository`
+   method parameters and returns. Nested generated case types are a new leak
+   surface, and the final invariant also covers hand-written public
    records/properties/constructors plus generated types nested inside generic,
-   array and by-ref signatures. Replace the fixed-set repository-only check with
-   a generic whole-public-surface check before union projection is enabled.
-5. **Keep existing public behavior tests stable.** Union projection by itself
-   must not change `GixException`, `GixErrorKind`, `GixObjectType` or any public
+   array and by-ref signatures. Replace the fixed-set repository-only check with a
+   generic whole-public-surface check, and make generated-type detection recognise
+   nested case types structurally rather than by hand-enumerating them.
+7. **Keep existing public behavior tests stable.** Union projection by itself must
+   not change `GixException`, `GixErrorKind`, `GixObjectType` or any public
    repository signature. Existing tests for native-error translation and object
-   metadata are therefore regression tests for the migration. Rust-side tests
-   that pattern-match `GixError` / `FfiObjectType` do not change merely because
-   the C# projection changes; they change later when P0b changes the Rust error
-   ABI itself.
+   metadata are therefore the regression suite for this migration. Rust-side tests
+   that pattern-match `GixError` / `FfiObjectType` do not change merely because the
+   C# projection changes; they change later when P0b changes the Rust error ABI.
+
 
 #### Existing public shape to redesign before 1.0 - `GixHead`
 
@@ -872,18 +924,17 @@ closed, and **P0a is now closed at the boundary-contract level** by
 prototype as prerequisite work and do not resume broad surface expansion yet.
 The remaining high-coupling work is:
 
-1. **Consume the Interoptopus enum prerequisite instead of building a GixSharp
-   workaround:** wait for the discriminant Step 0 and opt-in plain-`DataEnum`
-   C# 15 custom-union projection described by `docs/csharp-unions.md`, with the
-   Interoptopus snapshot baseline repaired and a flag-on generated-C# compile
-   fixture green. Pin that fork revision, enable its union builder option in
-   `tests/generate_bindings.rs`, and regenerate `bindings/Interop.cs`. As part of
-   that adoption, migrate `ReadObjectType(FfiObjectType)` to generated union-case
-   matching and strengthen the managed-signature reflection invariant to catch
-   nested generated `*Case` types. Do **not** do a standalone rewrite of the
-   coarse `GixError` translation or the generated `Result*`/`.AsOk()` path at
-   this stage: fold the former into P0b and re-audit the latter only when
-   Interoptopus's deferred Result-union phase lands.
+1. **Consume the Interoptopus union work instead of building a GixSharp
+   workaround.** Its Steps 0 (discriminants), 1 (collision-safe naming) and 2
+   (net11/preview retarget) are landed; what remains is Steps 3-5 - the managed
+   representation, conversion correctness, and the validation that the retargeted
+   consumer projects compile the output. There is no builder flag: unions are the
+   default generated `DataEnum` representation in this fork. Pin that revision and
+   regenerate `bindings/Interop.cs`. In the same adoption transaction, audit the
+   generated `Result*` / `.AsOk()` paths - `Result` carriers are projected in this
+   pass, not a later one - and strengthen the managed-signature reflection
+   invariant to catch nested generated case types before regenerating. Do **not**
+   do a standalone rewrite of the coarse `GixError` translation; fold it into P0b.
 2. **P0b error ABI:** with the generator prerequisite available, implement the
    semantic envelope, freeze `Kind` categories and the extensible `Code`
    convention, expose retryability separately, and model only actionable
@@ -895,6 +946,16 @@ The remaining high-coupling work is:
    Add tests for object-kind mismatch, conflicted index, empty-commit refusal,
    reference lock contention and reference-out-of-date; no test or managed
    branch should parse diagnostics.
+
+   **Typed recovery detail hits a generator ceiling.** Interoptopus models unit
+   variants and single-payload tuple variants only; named and multi-field Rust
+   variants are explicitly out of scope for this projection. The two detail shapes
+   P0b needs - reference conflict (name, expected, actual) and object-kind
+   mismatch (id, expected kind, actual kind) - are three-field variants. So either
+   ship the envelope (`Kind`, `Code`, retryability, message) now and defer only the
+   typed detail, or accept a payload record per case *deliberately*, on the grounds
+   that the record is a real domain object rather than a workaround. Decide which
+   before starting; do not discover it mid-implementation.
 3. **P0c structured cursors:** with the proven P0a reader lifecycle and P0b error
    semantics fixed, replace the native eager `rev_walk` precedent with a
    bounded-batch cursor and exercise the same managed contract against `dirwalk`
@@ -915,7 +976,9 @@ The remaining high-coupling work is:
 6. **Remove the known public sentinel sum type before API stabilization:** once
    the needed generic rich-enum support is available, replace `HeadInfo`'s
    target/referent/boolean encoding and the public positional `GixHead` record
-   with the closed HEAD-state model described above. Treat the baseline change
+   with the closed HEAD-state model described above. Note that
+   `SymbolicResolved(reference, id)` is itself a two-field variant and therefore
+   also depends on the ceiling described under P0b. Treat the baseline change
    as intentional, update the existing born/unborn/detached tests in the same
    transaction, then approve the new public baseline. Do not use this as a
    reason to convert ordinary scalar enums or flags to unions. The later
@@ -934,29 +997,39 @@ locally when it is demonstrably the right API shape, but it is an optimisation
 decision, not the architecture for iteration or bulk data.
 
 
+
 ## Also outstanding
 
 - Issue `f7bf7635`: `build.rs` asserting the pinned local Interoptopus patch is
   active.
-- Interoptopus `docs/csharp-unions.md`: current status is **plan, not approved**.
-  Its Step 0 discriminant-model fix is blocking the planned opt-in plain
-  `DataEnum` C# 15 custom-union projection. GixSharp intentionally waits for
-  this generic work rather than creating a parallel wrapper-enum architecture.
-- Interoptopus snapshot baseline issue `ccb105a2`: template changes cannot be
-  reviewed reliably until the failing snapshot drift is repaired. The union
-  plan also requires a flag-on net11 / `LangVersion=preview` generated-C#
-  compile fixture; native API guard coverage is not sufficient because the
-  union projection preserves the native ABI/hash.
+- Interoptopus `docs/csharp-unions.md`: Steps 0-2 landed; **Steps 3-5 are the
+  blocker.** GixSharp intentionally waits for this generic work rather than
+  creating a parallel wrapper-enum architecture. Earlier revisions of this list
+  said the plan was "not approved" with Step 0 blocking; that quoted a stale
+  header and is corrected.
+- Interoptopus snapshot baseline issue `ccb105a2`: open, **low severity** - one
+  snapshot awaiting `cargo insta review` for an unrelated template change. The
+  earlier "29 of 33 failing" reading was retracted as a Git LFS materialization
+  failure. It does not gate template work.
+- The union projection needs a net11 / `LangVersion=preview` generated-C# compile
+  check, because the projection preserves the native ABI and hash and the API
+  guard therefore cannot see it. Interoptopus satisfies this through its own
+  retargeted `Bindings`, `Tests` and plugin projects; GixSharp still needs its own
+  equivalent over regenerated `Interop.cs`.
 - The existing Interoptopus `validate()` fix (`2a6da76a`) and `Vec<T>` accessors
   remain local-fork dependencies until their upstream/fork disposition is
-  settled.
-- `ffi::Option` / `ffi::Result` union projection is explicitly deferred by the
-  current Interoptopus plan. Keep GixSharp's public managed result/error
-  translation independent of that generated ergonomics so it can converge
-  later without a public API break.
+  settled. `1383b84b` (MCP transactions vs LFS) and `7c8cb22e` are also open.
+- `ffi::Option` / `ffi::Result` **projection is not deferred** - their `DataEnum`
+  carriers go through the same pass. What is deferred is `Result`-specific tidying
+  (`IResult<T,E>` coexistence, `AsOk`/`AsErr`, `body_from_call` factory names).
+  Keep GixSharp's public managed result/error translation independent of that
+  generated ergonomics so it can converge later without a public API break.
+- There is currently no `ffi::Option` in the gix-ffi surface, so the `has_* +
+  payload` and empty-value sentinel shapes remain future internal FFI cleanup.
 - Parked, unrelated to the bridge: `gix-ref` reflog creates directories and
   an empty file BEFORE validating the committer, leaving debris on a pure
   validation failure. `gix-ref/src/store/file/loose/reflog.rs` ~119-153.
+
 
 ## Environment
 
