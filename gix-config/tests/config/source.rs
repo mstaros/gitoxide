@@ -84,3 +84,28 @@ fn git_config_global() {
         );
     }
 }
+
+#[test]
+fn user_config_location_does_not_bypass_environment_lookup() {
+    let mut variables = Vec::new();
+    let location = Source::User.storage_location(&mut |name| {
+        variables.push(name.to_owned());
+        (name == "HOME").then(|| "home".into())
+    });
+    assert_eq!(location, Some(Path::new("home").join(".gitconfig")));
+    assert_eq!(
+        variables,
+        vec!["GIT_CONFIG_GLOBAL".to_owned(), "HOME".to_owned()]
+    );
+
+    let mut variables = Vec::new();
+    let location = Source::User.storage_location(&mut |name| {
+        variables.push(name.to_owned());
+        None
+    });
+    assert_eq!(location, None);
+    assert_eq!(
+        variables,
+        vec!["GIT_CONFIG_GLOBAL".to_owned(), "HOME".to_owned()]
+    );
+}

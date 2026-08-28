@@ -96,15 +96,6 @@ impl Source {
             User => env_var("GIT_CONFIG_GLOBAL").map(PathBuf::from).or_else(|| {
                 env_var("HOME")
                     .map(PathBuf::from)
-                    .or_else(|| {
-                        if cfg!(windows) {
-                            // On Windows, HOME is rarely set, and we generally need something more.
-                            std::env::home_dir()
-                        } else {
-                            // Git also only tries the env var on unix, and so do we
-                            None
-                        }
-                    })
                     .map(|mut p| {
                         p.push(".gitconfig");
                         p
