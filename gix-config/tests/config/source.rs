@@ -14,16 +14,15 @@ fn git_config_no_system() {
         }),
         None
     );
-    assert!(
-        Source::GitInstallation
-            .storage_location(&mut |name| {
-                assert_eq!(
-                    name, "GIT_CONFIG_NOSYSTEM",
-                    "it only checks this var, and if set, nothing else"
-                );
-                Some("false".into())
-            })
-            .is_some(),
+    assert_eq!(
+        Source::GitInstallation.storage_location(&mut |name| {
+            assert_eq!(
+                name, "GIT_CONFIG_NOSYSTEM",
+                "it only checks this var, and if set, nothing else"
+            );
+            Some("false".into())
+        }),
+        gix_path::env::installation_config().map(Path::to_owned),
         "it treats the variable as boolean"
     );
     assert_eq!(

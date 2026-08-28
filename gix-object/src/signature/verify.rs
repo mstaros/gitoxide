@@ -306,6 +306,9 @@ impl SignedData<'_> {
         let verify_time = format!("-Overify-time={verify_time}");
         let mut signature_file = signature_file(signature)?;
         let signature_path = signature_path(&mut signature_file)?;
+        let signature_path = super::path_for_command(signature_path.as_os_str());
+        let allowed_signers = super::path_for_command(allowed_signers.as_os_str());
+        let revocation_file = revocation_file.map(|path| super::path_for_command(path.as_os_str()));
         // defensive, as we rely on English when parsing output.
         environment.extend([("LANG".into(), "C".into()), ("LC_ALL".into(), "C".into())]);
         let common = (

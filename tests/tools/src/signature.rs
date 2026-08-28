@@ -91,12 +91,40 @@ pub fn ssh_private_key() -> Result<(crate::tempfile::TempDir, PathBuf)> {
     let key = home.path().join("key");
     std::fs::copy(fixture("ssh-private"), &key)?;
     std::fs::copy(fixture("ssh-private.pub"), key.with_extension("pub"))?;
+    #[cfg(windows)]
+    restrict_private_key_permissions(&key)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok((home, key))
+}
+
+#[cfg(windows)]
+fn restrict_private_key_permissions(path: &Path) -> Result {
+    let username = std::env::var_os("USERNAME").ok_or("USERNAME is required to restrict the SSH fixture key")?;
+    let mut principal = std::env::var_os("USERDOMAIN").unwrap_or_default();
+    if !principal.is_empty() {
+        principal.push("\\");
+    }
+    principal.push(username);
+    principal.push(":F");
+
+    let output = Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(principal)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to restrict SSH fixture key permissions: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Import the passwordless OpenPGP signing identity into a temporary home.

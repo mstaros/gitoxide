@@ -1490,7 +1490,8 @@ fn force_and_dir(
 ) -> (bool, PathBuf) {
     destination_dir.map_or_else(
         || {
-            let mut dir = fixture_cache_base(fixture_base).join(
+            let archive_name = archive_name.as_ref();
+            let mut dir = fixture_cache_base(fixture_base, archive_name).join(
                 Path::new("generated-do-not-edit")
                     .join(archive_name)
                     .join(object_hash.unwrap_or_else(self::object_hash).to_string()),
@@ -1506,7 +1507,10 @@ fn force_and_dir(
 }
 
 #[cfg(windows)]
-fn fixture_cache_base(_fixture_base: &Path) -> PathBuf {
+fn fixture_cache_base(fixture_base: &Path, archive_name: &Path) -> PathBuf {
+    if archive_name != Path::new("make_submodules") {
+        return fixture_base.to_owned();
+    }
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1519,7 +1523,7 @@ fn fixture_cache_base(_fixture_base: &Path) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn fixture_cache_base(fixture_base: &Path) -> PathBuf {
+fn fixture_cache_base(fixture_base: &Path, _archive_name: &Path) -> PathBuf {
     fixture_base.to_owned()
 }
 

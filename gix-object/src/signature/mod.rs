@@ -4,6 +4,25 @@ use std::ops::Range;
 
 use bstr::{BStr, BString, ByteSlice};
 
+#[cfg(feature = "signature")]
+fn path_for_command(path: &std::ffi::OsStr) -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        std::ffi::OsString::from_wide(
+            &path
+                .encode_wide()
+                .map(|unit| if unit == b'\\' as u16 { b'/' as u16 } else { unit })
+                .collect::<Vec<_>>(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_owned()
+    }
+}
+
 /// Object signing with external-program options.
 #[cfg(feature = "signature")]
 pub mod sign;
@@ -93,4 +112,13 @@ impl Format {
             None
         }
     }
+}
+
+#[cfg(all(test, feature = "signature", windows))]
+#[test]
+fn external_command_paths_use_forward_slashes_on_windows() {
+    assert_eq!(
+        path_for_command(std::ffi::OsStr::new(r"C:\Users\name\key")),
+        "C:/Users/name/key"
+    );
 }

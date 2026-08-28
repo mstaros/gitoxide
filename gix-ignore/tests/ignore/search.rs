@@ -35,13 +35,13 @@ fn baseline_from_git_dir() -> crate::Result {
         "star-and-excludes-in-subdir",
         "slash-and-excludes-in-subdir",
     ] {
-        let case = if gix_fs::Capabilities::probe("../.git".as_ref()).ignore_case {
+        let dir = gix_testtools::scripted_fixture_read_only("make_global_and_external_and_dir_ignores.sh")?;
+        let repo_dir = dir.join(repo_name);
+        let case = if gix_fs::Capabilities::probe_dir(&repo_dir).ignore_case {
             Case::Fold
         } else {
             Case::Sensitive
         };
-        let dir = gix_testtools::scripted_fixture_read_only("make_global_and_external_and_dir_ignores.sh")?;
-        let repo_dir = dir.join(repo_name);
         let git_dir = repo_dir.join(".git");
         let baseline = std::fs::read(git_dir.parent().unwrap().join("git-check-ignore.baseline"))?;
         let mut buf = Vec::new();
