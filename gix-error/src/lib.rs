@@ -354,5 +354,8 @@ pub use concrete::message::{Message, message};
 pub use concrete::validate::ValidationError;
 
 pub(crate) fn write_location(f: &mut std::fmt::Formatter<'_>, location: &std::panic::Location) -> std::fmt::Result {
-    write!(f, ", at {}:{}", location.file(), location.line())
+    let file = location.file();
+    #[cfg(windows)]
+    let file = file.replace('\\', "/");
+    write!(f, ", at {file}:{}", location.line())
 }

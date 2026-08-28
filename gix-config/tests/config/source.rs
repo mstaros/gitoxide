@@ -14,16 +14,15 @@ fn git_config_no_system() {
         }),
         None
     );
-    assert!(
-        Source::GitInstallation
-            .storage_location(&mut |name| {
-                assert_eq!(
-                    name, "GIT_CONFIG_NOSYSTEM",
-                    "it only checks this var, and if set, nothing else"
-                );
-                Some("false".into())
-            })
-            .is_some(),
+    assert_eq!(
+        Source::GitInstallation.storage_location(&mut |name| {
+            assert_eq!(
+                name, "GIT_CONFIG_NOSYSTEM",
+                "it only checks this var, and if set, nothing else"
+            );
+            Some("false".into())
+        }),
+        gix_path::env::installation_config().map(Path::to_owned),
         "it treats the variable as boolean"
     );
     assert_eq!(
@@ -83,4 +82,29 @@ fn git_config_global() {
             "we respect the global config variable for 'git' overrides"
         );
     }
+}
+
+#[test]
+fn user_config_location_does_not_bypass_environment_lookup() {
+    let mut variables = Vec::new();
+    let location = Source::User.storage_location(&mut |name| {
+        variables.push(name.to_owned());
+        (name == "HOME").then(|| "home".into())
+    });
+    assert_eq!(location, Some(Path::new("home").join(".gitconfig")));
+    assert_eq!(
+        variables,
+        vec!["GIT_CONFIG_GLOBAL".to_owned(), "HOME".to_owned()]
+    );
+
+    let mut variables = Vec::new();
+    let location = Source::User.storage_location(&mut |name| {
+        variables.push(name.to_owned());
+        None
+    });
+    assert_eq!(location, None);
+    assert_eq!(
+        variables,
+        vec!["GIT_CONFIG_GLOBAL".to_owned(), "HOME".to_owned()]
+    );
 }

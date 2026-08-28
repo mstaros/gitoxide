@@ -12,19 +12,19 @@ use crate::Result;
 
 #[test]
 fn ssh() -> Result {
-    if !signature::program_available("ssh-keygen") {
+    let Some(ssh_keygen) = signature::ssh_keygen() else {
         return Ok(());
-    }
+    };
     let (key_home, key) = signature::ssh_private_key()?;
     let signed = commit().sign(Options {
         format: Format::Ssh,
-        program: "ssh-keygen".into(),
+        program: ssh_keygen.clone().into_os_string(),
         program_arguments: Vec::new(),
         signing_key: key.into_os_string(),
         environment: Vec::new(),
     })?;
     assert!(
-        verify_ssh(&signed)?.is_valid(),
+        verify_ssh(&signed, &ssh_keygen)?.is_valid(),
         "the plumbing verifier accepts the generated SSH signature"
     );
     drop(key_home);
@@ -94,9 +94,9 @@ fn x509() -> Result {
 
 #[test]
 fn replaces_the_active_signature() -> Result {
-    if !signature::program_available("ssh-keygen") {
+    let Some(ssh_keygen) = signature::ssh_keygen() else {
         return Ok(());
-    }
+    };
     let (key_home, key) = signature::ssh_private_key()?;
     let mut commit = commit();
     commit.extra_headers.push(("before".into(), "one".into()));
@@ -104,7 +104,7 @@ fn replaces_the_active_signature() -> Result {
     commit.extra_headers.push(("after".into(), "two".into()));
     let signed = commit.sign(Options {
         format: Format::Ssh,
-        program: "ssh-keygen".into(),
+        program: ssh_keygen.clone().into_os_string(),
         program_arguments: Vec::new(),
         signing_key: key.into_os_string(),
         environment: Vec::new(),
@@ -119,7 +119,7 @@ fn replaces_the_active_signature() -> Result {
         "the old active signature is removed and its replacement is appended like Git"
     );
     assert!(
-        verify_ssh(&signed)?.is_valid(),
+        verify_ssh(&signed, &ssh_keygen)?.is_valid(),
         "the plumbing verifier accepts the replacement signature"
     );
     drop(key_home);
@@ -128,22 +128,22 @@ fn replaces_the_active_signature() -> Result {
 
 #[test]
 fn sha256_uses_its_git_signature_header() -> Result {
-    if !signature::program_available("ssh-keygen") {
+    let Some(ssh_keygen) = signature::ssh_keygen() else {
         return Ok(());
-    }
+    };
     let (key_home, key) = signature::ssh_private_key()?;
     let mut commit = commit();
     commit.tree = gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha256);
     let signed = commit.sign(Options {
         format: Format::Ssh,
-        program: "ssh-keygen".into(),
+        program: ssh_keygen.clone().into_os_string(),
         program_arguments: Vec::new(),
         signing_key: key.into_os_string(),
         environment: Vec::new(),
     })?;
     assert_eq!(signed.extra_headers[0].0, "gpgsig-sha256");
     assert!(
-        verify_ssh(&signed)?.is_valid(),
+        verify_ssh(&signed, &ssh_keygen)?.is_valid(),
         "the plumbing verifier accepts the SHA-256 signature"
     );
     drop(key_home);
@@ -175,11 +175,11 @@ fn verify(commit: &Commit, options: VerifyOptions) -> Result<gix_object::signatu
     Ok(signed.verify(&signature, options)?)
 }
 
-fn verify_ssh(commit: &Commit) -> Result<gix_object::signature::verify::Outcome> {
+fn verify_ssh(commit: &Commit, ssh_keygen: &std::path::Path) -> Result<gix_object::signature::verify::Outcome> {
     verify(
         commit,
         VerifyOptions::Ssh {
-            program: "ssh-keygen".into(),
+            program: ssh_keygen.as_os_str().into(),
             program_arguments: Vec::new(),
             environment: Vec::new(),
             allowed_signers: signature::fixture("ssh-allowed-signers"),

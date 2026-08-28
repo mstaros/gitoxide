@@ -2,7 +2,7 @@ use std::{
     // defensive, as we rely on English when parsing output.
     ffi::{OsStr, OsString},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
 };
 
@@ -306,6 +306,9 @@ impl SignedData<'_> {
         let verify_time = format!("-Overify-time={verify_time}");
         let mut signature_file = signature_file(signature)?;
         let signature_path = signature_path(&mut signature_file)?;
+        let signature_path = super::path_for_command(signature_path.as_os_str());
+        let allowed_signers = super::path_for_command(allowed_signers.as_os_str());
+        let revocation_file = revocation_file.map(|path| super::path_for_command(path.as_os_str()));
         // defensive, as we rely on English when parsing output.
         environment.extend([("LANG".into(), "C".into()), ("LC_ALL".into(), "C".into())]);
         let common = (
@@ -436,12 +439,15 @@ fn prepare(
     arguments: impl IntoIterator<Item = OsString>,
     environment: &[(OsString, OsString)],
 ) -> gix_command::Prepare {
-    environment.iter().fold(
-        gix_command::prepare(program)
-            .command_may_be_shell_script()
-            .args(arguments),
-        |command, (key, value)| command.env(key, value),
-    )
+    let command = gix_command::prepare(program);
+    let command = if Path::new(program).is_file() {
+        command
+    } else {
+        command.command_may_be_shell_script()
+    };
+    environment
+        .iter()
+        .fold(command.args(arguments), |command, (key, value)| command.env(key, value))
 }
 
 fn run_prepared(

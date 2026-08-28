@@ -67,6 +67,38 @@ pub fn program_available(program: &str) -> bool {
         .is_ok()
 }
 
+/// Return an SSH signing program, preferring the one bundled with Git on Windows.
+///
+/// Windows can provide an older OpenSSH in PATH than the Git installation used by
+/// the tests. Git's bundled program supports the same SSH-signing feature set as Git
+/// itself and avoids making test behavior depend on sanitized runner PATH values.
+pub fn ssh_keygen() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(program) = git_for_windows_ssh_keygen() {
+            return Some(program);
+        }
+    }
+    program_available("ssh-keygen").then(|| PathBuf::from("ssh-keygen"))
+}
+
+#[cfg(windows)]
+fn git_for_windows_ssh_keygen() -> Option<PathBuf> {
+    let core_dir = gix_path::env::core_dir()?;
+    let platform = core_dir.ancestors().nth(2)?;
+    if !["mingw64", "mingw32", "clangarm64", "clang64", "clang32", "ucrt64"]
+        .iter()
+        .any(|name| platform.ends_with(name))
+    {
+        return None;
+    }
+    let root = platform.parent()?;
+    ["bin", "usr/bin"]
+        .into_iter()
+        .map(|directory| root.join(directory).join("ssh-keygen.exe"))
+        .find(|program| program.is_file())
+}
+
 /// Create an isolated signer home with suitably restrictive permissions.
 pub fn isolated_home() -> Result<crate::tempfile::TempDir> {
     #[cfg(unix)]
@@ -91,12 +123,58 @@ pub fn ssh_private_key() -> Result<(crate::tempfile::TempDir, PathBuf)> {
     let key = home.path().join("key");
     std::fs::copy(fixture("ssh-private"), &key)?;
     std::fs::copy(fixture("ssh-private.pub"), key.with_extension("pub"))?;
+    #[cfg(windows)]
+    restrict_private_key_permissions(&key)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok((home, key))
+}
+
+#[cfg(windows)]
+fn restrict_private_key_permissions(path: &Path) -> Result {
+    let identity = Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()?;
+    if !identity.status.success() {
+        return Err(format!(
+            "failed to determine the current Windows identity: {}{}",
+            String::from_utf8_lossy(&identity.stdout),
+            String::from_utf8_lossy(&identity.stderr)
+        )
+        .into());
+    }
+    let sid = sid_from_whoami(&identity.stdout).ok_or("whoami did not report a Windows SID")?;
+    let principal = format!("*{sid}:F");
+
+    let output = Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(principal)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to restrict SSH fixture key permissions: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn sid_from_whoami(output: &[u8]) -> Option<&str> {
+    let start = output.windows(4).position(|window| window == b"S-1-")?;
+    let sid = &output[start..];
+    let end = sid
+        .iter()
+        .skip(1)
+        .position(|byte| !byte.is_ascii_digit() && *byte != b'-')
+        .map_or(sid.len(), |position| position + 1);
+    std::str::from_utf8(&sid[..end]).ok()
 }
 
 /// Import the passwordless OpenPGP signing identity into a temporary home.
@@ -166,7 +244,7 @@ fn run(command: &mut Command) -> Result {
 
 #[cfg(test)]
 mod tests {
-    use super::msys_path;
+    use super::{msys_path, sid_from_whoami};
 
     #[test]
     fn windows_paths_for_unix_derived_commands_are_msys_paths() {
@@ -174,5 +252,13 @@ mod tests {
         assert_eq!(msys_path("D:/a/project/key"), "/d/a/project/key");
         assert_eq!(msys_path(r"relative\key"), "relative/key");
         assert_eq!(msys_path(r"\\server\share\key"), "//server/share/key");
+    }
+
+    #[test]
+    fn windows_sid_is_extracted_without_decoding_the_account_name() {
+        assert_eq!(
+            sid_from_whoami(b"\"DOMAIN\\user\",\"S-1-5-21-1000\"\r\n"),
+            Some("S-1-5-21-1000")
+        );
     }
 }

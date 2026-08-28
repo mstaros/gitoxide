@@ -1,7 +1,7 @@
 use std::{
     ffi::{OsStr, OsString},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
 };
 
@@ -110,12 +110,18 @@ fn sign(payload: &[u8], options: &Options) -> Result<BString, Error> {
 }
 
 fn command(options: &Options) -> gix_command::Prepare {
-    options.environment.iter().fold(
-        gix_command::prepare(&options.program)
-            .command_may_be_shell_script()
-            .args(&options.program_arguments),
-        |command, (key, value)| command.env(key, value),
-    )
+    let command = gix_command::prepare(&options.program);
+    let command = if Path::new(&options.program).is_file() {
+        command
+    } else {
+        command.command_may_be_shell_script()
+    };
+    options
+        .environment
+        .iter()
+        .fold(command.args(&options.program_arguments), |command, (key, value)| {
+            command.env(key, value)
+        })
 }
 
 fn sign_gpg(payload: &[u8], options: &Options) -> Result<BString, Error> {
@@ -168,18 +174,20 @@ fn sign_ssh(payload: &[u8], options: &Options) -> Result<BString, Error> {
         // Unlike literal keys, resolved key paths can be passed directly to `ssh-keygen -f`.
         None => (options.signing_key.clone(), false),
     };
+    let key = super::path_for_command(&key);
     let mut payload_file = secure_temporary_file()?;
     write_temporary(&mut payload_file, payload)?;
     let payload_path = temporary_path(&mut payload_file)?;
     let mut signature_path = payload_path.as_os_str().to_owned();
     signature_path.push(".sig");
     let signature_path = PathBuf::from(signature_path);
+    let payload_path_for_command = super::path_for_command(payload_path.as_os_str());
     let mut command = command(options).args(["-Y", "sign", "-n", "git", "-f"]).arg(key);
     if literal {
         command = command.arg("-U");
     }
     let output = command
-        .arg(&payload_path)
+        .arg(payload_path_for_command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
