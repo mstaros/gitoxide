@@ -1508,7 +1508,9 @@ fn force_and_dir(
 
 #[cfg(windows)]
 fn fixture_cache_base(fixture_base: &Path, archive_name: &Path) -> PathBuf {
-    if archive_name != Path::new("make_submodules") {
+    if archive_name != Path::new("make_submodules")
+        && archive_name != Path::new("make_submodule_with_worktree")
+    {
         return fixture_base.to_owned();
     }
     use std::hash::{Hash, Hasher};

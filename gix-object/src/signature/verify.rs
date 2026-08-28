@@ -2,7 +2,7 @@ use std::{
     // defensive, as we rely on English when parsing output.
     ffi::{OsStr, OsString},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
 };
 
@@ -439,12 +439,15 @@ fn prepare(
     arguments: impl IntoIterator<Item = OsString>,
     environment: &[(OsString, OsString)],
 ) -> gix_command::Prepare {
-    environment.iter().fold(
-        gix_command::prepare(program)
-            .command_may_be_shell_script()
-            .args(arguments),
-        |command, (key, value)| command.env(key, value),
-    )
+    let command = gix_command::prepare(program);
+    let command = if Path::new(program).is_file() {
+        command
+    } else {
+        command.command_may_be_shell_script()
+    };
+    environment
+        .iter()
+        .fold(command.args(arguments), |command, (key, value)| command.env(key, value))
 }
 
 fn run_prepared(

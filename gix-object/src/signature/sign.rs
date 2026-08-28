@@ -1,7 +1,7 @@
 use std::{
     ffi::{OsStr, OsString},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
 };
 
@@ -110,12 +110,18 @@ fn sign(payload: &[u8], options: &Options) -> Result<BString, Error> {
 }
 
 fn command(options: &Options) -> gix_command::Prepare {
-    options.environment.iter().fold(
-        gix_command::prepare(&options.program)
-            .command_may_be_shell_script()
-            .args(&options.program_arguments),
-        |command, (key, value)| command.env(key, value),
-    )
+    let command = gix_command::prepare(&options.program);
+    let command = if Path::new(&options.program).is_file() {
+        command
+    } else {
+        command.command_may_be_shell_script()
+    };
+    options
+        .environment
+        .iter()
+        .fold(command.args(&options.program_arguments), |command, (key, value)| {
+            command.env(key, value)
+        })
 }
 
 fn sign_gpg(payload: &[u8], options: &Options) -> Result<BString, Error> {

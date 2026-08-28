@@ -67,6 +67,38 @@ pub fn program_available(program: &str) -> bool {
         .is_ok()
 }
 
+/// Return an SSH signing program, preferring the one bundled with Git on Windows.
+///
+/// Windows can provide an older OpenSSH in PATH than the Git installation used by
+/// the tests. Git's bundled program supports the same SSH-signing feature set as Git
+/// itself and avoids making test behavior depend on sanitized runner PATH values.
+pub fn ssh_keygen() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(program) = git_for_windows_ssh_keygen() {
+            return Some(program);
+        }
+    }
+    program_available("ssh-keygen").then(|| PathBuf::from("ssh-keygen"))
+}
+
+#[cfg(windows)]
+fn git_for_windows_ssh_keygen() -> Option<PathBuf> {
+    let core_dir = gix_path::env::core_dir()?;
+    let platform = core_dir.ancestors().nth(2)?;
+    if !["mingw64", "mingw32", "clangarm64", "clang64", "clang32", "ucrt64"]
+        .iter()
+        .any(|name| platform.ends_with(name))
+    {
+        return None;
+    }
+    let root = platform.parent()?;
+    ["bin", "usr/bin"]
+        .into_iter()
+        .map(|directory| root.join(directory).join("ssh-keygen.exe"))
+        .find(|program| program.is_file())
+}
+
 /// Create an isolated signer home with suitably restrictive permissions.
 pub fn isolated_home() -> Result<crate::tempfile::TempDir> {
     #[cfg(unix)]
