@@ -103,13 +103,19 @@ pub fn ssh_private_key() -> Result<(crate::tempfile::TempDir, PathBuf)> {
 
 #[cfg(windows)]
 fn restrict_private_key_permissions(path: &Path) -> Result {
-    let username = std::env::var_os("USERNAME").ok_or("USERNAME is required to restrict the SSH fixture key")?;
-    let mut principal = std::env::var_os("USERDOMAIN").unwrap_or_default();
-    if !principal.is_empty() {
-        principal.push("\\");
+    let identity = Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()?;
+    if !identity.status.success() {
+        return Err(format!(
+            "failed to determine the current Windows identity: {}{}",
+            String::from_utf8_lossy(&identity.stdout),
+            String::from_utf8_lossy(&identity.stderr)
+        )
+        .into());
     }
-    principal.push(username);
-    principal.push(":F");
+    let sid = sid_from_whoami(&identity.stdout).ok_or("whoami did not report a Windows SID")?;
+    let principal = format!("*{sid}:F");
 
     let output = Command::new("icacls")
         .arg(path)
@@ -125,6 +131,18 @@ fn restrict_private_key_permissions(path: &Path) -> Result {
         .into());
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn sid_from_whoami(output: &[u8]) -> Option<&str> {
+    let start = output.windows(4).position(|window| window == b"S-1-")?;
+    let sid = &output[start..];
+    let end = sid
+        .iter()
+        .skip(1)
+        .position(|byte| !byte.is_ascii_digit() && *byte != b'-')
+        .map_or(sid.len(), |position| position + 1);
+    std::str::from_utf8(&sid[..end]).ok()
 }
 
 /// Import the passwordless OpenPGP signing identity into a temporary home.
@@ -194,7 +212,7 @@ fn run(command: &mut Command) -> Result {
 
 #[cfg(test)]
 mod tests {
-    use super::msys_path;
+    use super::{msys_path, sid_from_whoami};
 
     #[test]
     fn windows_paths_for_unix_derived_commands_are_msys_paths() {
@@ -202,5 +220,13 @@ mod tests {
         assert_eq!(msys_path("D:/a/project/key"), "/d/a/project/key");
         assert_eq!(msys_path(r"relative\key"), "relative/key");
         assert_eq!(msys_path(r"\\server\share\key"), "//server/share/key");
+    }
+
+    #[test]
+    fn windows_sid_is_extracted_without_decoding_the_account_name() {
+        assert_eq!(
+            sid_from_whoami(b"\"DOMAIN\\user\",\"S-1-5-21-1000\"\r\n"),
+            Some("S-1-5-21-1000")
+        );
     }
 }
