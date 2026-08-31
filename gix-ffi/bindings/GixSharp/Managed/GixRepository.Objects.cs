@@ -280,18 +280,14 @@ public sealed partial class GixRepository
     }
 
     private static GixObjectType ReadObjectType(FfiObjectType objectType)
-    {
-        if (objectType.IsCommit)
-            return GixObjectType.Commit;
-        if (objectType.IsTree)
-            return GixObjectType.Tree;
-        if (objectType.IsBlob)
-            return GixObjectType.Blob;
-        if (objectType.IsTag)
-            return GixObjectType.Tag;
-
-        throw new InvalidOperationException("gitoxide returned an unknown object type.");
-    }
+        => objectType switch
+        {
+            FfiObjectType.Commit => GixObjectType.Commit,
+            FfiObjectType.Tree => GixObjectType.Tree,
+            FfiObjectType.Blob => GixObjectType.Blob,
+            FfiObjectType.Tag => GixObjectType.Tag,
+            _ => throw new InvalidOperationException("gitoxide returned an unknown object type."),
+        };
 
     private static int SignatureOffsetSeconds(GixSignature? signature) =>
         signature is null
