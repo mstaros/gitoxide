@@ -126,6 +126,12 @@ pub mod open_index {
         ConfigIndexThreads(#[from] crate::config::key::GenericErrorWithValue),
         #[error(transparent)]
         ConfigSkipHash(#[from] crate::config::boolean::Error),
+        #[error("Invalid core.sparseCheckout configuration")]
+        ConfigSparseCheckout(#[source] crate::config::boolean::Error),
+        #[error("Invalid core.sparseCheckoutCone configuration")]
+        ConfigSparseCheckoutCone(#[source] crate::config::boolean::Error),
+        #[error("Invalid index.sparse configuration")]
+        ConfigSparseIndex(#[source] crate::config::boolean::Error),
         #[error(transparent)]
         IndexFile(#[from] gix_index::file::init::Error),
         #[error(transparent)]

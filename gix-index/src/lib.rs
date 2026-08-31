@@ -25,6 +25,8 @@ pub mod extension;
 pub mod entry;
 
 mod access;
+/// Sparse-checkout and sparse-index configuration.
+pub use access::sparse;
 
 ///
 pub mod init;
@@ -77,6 +79,8 @@ pub struct File {
     pub(crate) path: PathBuf,
     /// The checksum of all bytes prior to the checksum itself.
     pub(crate) checksum: Option<gix_hash::ObjectId>,
+    /// Sparse-checkout configuration that was active when this file was opened.
+    pub(crate) sparse_options: sparse::Options,
 }
 
 /// The type to use and store paths to all entries.

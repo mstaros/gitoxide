@@ -102,9 +102,9 @@ mod signature {
     #[serial]
     #[cfg_attr(windows, ignore = "TODO: requires direct investigation on Windows")]
     fn verifies_a_commit_signed_by_git_with_ssh() -> crate::Result {
-        if !signature::program_available("ssh-keygen") {
+        let Some(ssh_keygen) = signature::ssh_keygen() else {
             return Ok(());
-        }
+        };
         let (_key_home, key) = signature::ssh_private_key()?;
         // Git writes the signed commit.
         let fixture = gix_testtools::scripted_fixture_writable("make_basic_repo.sh")?;
@@ -113,6 +113,9 @@ mod signature {
         // interpretation while retaining the drive prefix. An MSYS path like `/c/...` isn't accepted here.
         let key_for_git = gix_path::to_unix_separators_on_windows(gix_path::into_bstr(&key));
         let signing_key = User::SIGNING_KEY.validated_assignment(key_for_git.as_ref())?;
+        let ssh_program_for_git =
+            gix_path::to_unix_separators_on_windows(gix_path::into_bstr(&ssh_keygen));
+        let ssh_program = gpg::Ssh::PROGRAM.validated_assignment(ssh_program_for_git.as_ref())?;
         let output = Command::new(gix_path::env::exe_invocation())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" })
@@ -123,6 +126,8 @@ mod signature {
             .arg(gix_path::from_bstring(email).into_os_string())
             .args(["-c", "gpg.format=ssh", "-c"])
             .arg(gix_path::from_bstring(signing_key).into_os_string())
+            .args(["-c"])
+            .arg(gix_path::from_bstring(ssh_program.clone()).into_os_string())
             .args(["commit", "--allow-empty", "-S", "-m", "signed by Git"])
             .output()?;
         assert!(
@@ -135,7 +140,7 @@ mod signature {
             .validated_assignment_fmt(&signature::fixture("ssh-allowed-signers").display())?;
         let repo = gix::open_opts(
             fixture.path(),
-            gix::open::Options::isolated().config_overrides([allowed_signers]),
+            gix::open::Options::isolated().config_overrides([allowed_signers, ssh_program]),
         )?;
         let outcome = repo
             .head_commit()?
@@ -152,14 +157,18 @@ mod signature {
 
     #[test]
     fn sign_write_and_verify_an_ssh_commit() -> crate::Result {
-        if !signature::program_available("ssh-keygen") {
+        let Some(ssh_keygen) = signature::ssh_keygen() else {
             return Ok(());
-        }
+        };
         let (_key_home, key) = signature::ssh_private_key()?;
+        let ssh_program = gpg::Ssh::PROGRAM.validated_assignment(
+            gix_path::to_unix_separators_on_windows(gix_path::into_bstr(&ssh_keygen)).as_ref(),
+        )?;
         let options = gix::open::Options::isolated().config_overrides([
             User::NAME.validated_assignment_fmt(&"Gitoxide Signing Fixture")?,
             User::EMAIL.validated_assignment_fmt(&signature::IDENTITY)?,
             Gpg::FORMAT.validated_assignment_fmt(&"ssh")?,
+            ssh_program,
             User::SIGNING_KEY.validated_assignment_fmt(&key.display())?,
             gpg::Ssh::ALLOWED_SIGNERS_FILE
                 .validated_assignment_fmt(&signature::fixture("ssh-allowed-signers").display())?,
@@ -169,7 +178,7 @@ mod signature {
             .with_object_memory();
         let mut signing_options = repo.commit_signing_options()?;
         assert_eq!(signing_options.format, gix::commit::sign::Format::Ssh);
-        assert_eq!(signing_options.program, "ssh-keygen");
+        assert_eq!(signing_options.program, ssh_keygen);
         assert_eq!(signing_options.signing_key, key);
         assert!(signing_options.program_arguments.is_empty());
         signing_options.program_arguments.push("-q".into());

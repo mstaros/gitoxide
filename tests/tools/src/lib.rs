@@ -351,6 +351,7 @@ const DISABLE_AUTO_MAINTENANCE_CONFIG: &[(&str, &str)] = &[("maintenance.auto", 
 const ISOLATED_GIT_CONFIG: &[(&str, &str)] = &[
     ("commit.gpgsign", "false"),
     ("tag.gpgsign", "false"),
+    ("core.longpaths", "true"),
     ("init.defaultBranch", "main"),
     ("protocol.file.allow", "always"),
     ("maintenance.auto", "false"),
@@ -1489,7 +1490,8 @@ fn force_and_dir(
 ) -> (bool, PathBuf) {
     destination_dir.map_or_else(
         || {
-            let mut dir = fixture_base.join(
+            let archive_name = archive_name.as_ref();
+            let mut dir = fixture_cache_base(fixture_base, archive_name).join(
                 Path::new("generated-do-not-edit")
                     .join(archive_name)
                     .join(object_hash.unwrap_or_else(self::object_hash).to_string()),
@@ -1502,6 +1504,29 @@ fn force_and_dir(
         },
         |d| (true, d.to_owned()),
     )
+}
+
+#[cfg(windows)]
+fn fixture_cache_base(fixture_base: &Path, archive_name: &Path) -> PathBuf {
+    if archive_name != Path::new("make_submodules")
+        && archive_name != Path::new("make_submodule_with_worktree")
+    {
+        return fixture_base.to_owned();
+    }
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    env::current_dir()
+        .expect("current directory is available while locating fixtures")
+        .hash(&mut hasher);
+    env::temp_dir()
+        .join("gix-test-fixtures")
+        .join(format!("{:016x}", hasher.finish()))
+}
+
+#[cfg(not(windows))]
+fn fixture_cache_base(fixture_base: &Path, _archive_name: &Path) -> PathBuf {
+    fixture_base.to_owned()
 }
 
 #[expect(clippy::too_many_arguments)]

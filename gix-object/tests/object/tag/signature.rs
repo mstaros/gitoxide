@@ -13,21 +13,21 @@ use crate::Result;
 
 #[test]
 fn ssh_and_tag_ref_api() -> Result {
-    if !signature::program_available("ssh-keygen") {
+    let Some(ssh_keygen) = signature::ssh_keygen() else {
         return Ok(());
-    }
+    };
     let (_key_home, key) = signature::ssh_private_key()?;
     let unsigned = tag(gix_hash::Kind::Sha1);
     let mut data = Vec::new();
     unsigned.write_to(&mut data)?;
     let signed = TagRef::from_bytes(&data, gix_hash::Kind::Sha1)?.sign(Options {
         format: Format::Ssh,
-        program: "ssh-keygen".into(),
+        program: ssh_keygen.clone().into_os_string(),
         program_arguments: Vec::new(),
         signing_key: key.into_os_string(),
         environment: Vec::new(),
     })?;
-    assert!(verify_ssh(&signed)?.is_valid(), "the generated SSH signature is valid");
+    assert!(verify_ssh(&signed, &ssh_keygen)?.is_valid(), "the generated SSH signature is valid");
     Ok(())
 }
 
@@ -97,15 +97,15 @@ fn x509() -> Result {
 
 #[test]
 fn replaces_the_active_signature_and_tampering_is_invalid() -> Result {
-    if !signature::program_available("ssh-keygen") {
+    let Some(ssh_keygen) = signature::ssh_keygen() else {
         return Ok(());
-    }
+    };
     let (key_home, key) = signature::ssh_private_key()?;
     let mut tag = tag(gix_hash::Kind::Sha1);
     tag.signature = Some("-----BEGIN PGP SIGNATURE-----\nold".into());
     let signed = tag.sign(Options {
         format: Format::Ssh,
-        program: "ssh-keygen".into(),
+        program: ssh_keygen.clone().into_os_string(),
         program_arguments: Vec::new(),
         signing_key: key.into_os_string(),
         environment: Vec::new(),
@@ -120,7 +120,7 @@ fn replaces_the_active_signature_and_tampering_is_invalid() -> Result {
         data.contains_str(b"-----BEGIN SSH SIGNATURE-----"),
         "exactly one replacement SSH signature is written"
     );
-    assert!(verify_ssh(&signed)?.is_valid(), "the replacement signature is valid");
+    assert!(verify_ssh(&signed, &ssh_keygen)?.is_valid(), "the replacement signature is valid");
 
     let message_start = data
         .windows(b"signed tag".len())
@@ -130,7 +130,7 @@ fn replaces_the_active_signature_and_tampering_is_invalid() -> Result {
     let (signature, signed_data) = TagRefIter::signature(&data).expect("the signature remains discoverable");
     let outcome = signed_data.verify(
         signature.data,
-        ssh_verify_options(gix_date::Time::new(1_700_000_000, 0)),
+        ssh_verify_options(gix_date::Time::new(1_700_000_000, 0), &ssh_keygen),
     )?;
     assert!(
         !outcome.is_valid(),
@@ -143,13 +143,13 @@ fn replaces_the_active_signature_and_tampering_is_invalid() -> Result {
 #[test]
 #[cfg(feature = "sha256")]
 fn native_sha256_has_one_in_body_signature_and_no_compatibility_header() -> Result {
-    if !signature::program_available("ssh-keygen") {
+    let Some(ssh_keygen) = signature::ssh_keygen() else {
         return Ok(());
-    }
+    };
     let (_key_home, key) = signature::ssh_private_key()?;
     let signed = tag(gix_hash::Kind::Sha256).sign(Options {
         format: Format::Ssh,
-        program: "ssh-keygen".into(),
+        program: ssh_keygen.clone().into_os_string(),
         program_arguments: Vec::new(),
         signing_key: key.into_os_string(),
         environment: Vec::new(),
@@ -162,7 +162,7 @@ fn native_sha256_has_one_in_body_signature_and_no_compatibility_header() -> Resu
         "the tag has an in-body SSH signature"
     );
     assert!(
-        verify_ssh(&signed)?.is_valid(),
+        verify_ssh(&signed, &ssh_keygen)?.is_valid(),
         "the native SHA-256 tag signature is valid"
     );
     Ok(())
@@ -235,16 +235,16 @@ fn verify(tag: &Tag, options: VerifyOptions) -> Result<Outcome> {
     Ok(signed.verify(signature.data, options)?)
 }
 
-fn verify_ssh(tag: &Tag) -> Result<Outcome> {
+fn verify_ssh(tag: &Tag, ssh_keygen: &std::path::Path) -> Result<Outcome> {
     verify(
         tag,
-        ssh_verify_options(tag.tagger.as_ref().expect("the fixture has a tagger").time),
+        ssh_verify_options(tag.tagger.as_ref().expect("the fixture has a tagger").time, ssh_keygen),
     )
 }
 
-fn ssh_verify_options(verify_time: gix_date::Time) -> VerifyOptions {
+fn ssh_verify_options(verify_time: gix_date::Time, ssh_keygen: &std::path::Path) -> VerifyOptions {
     VerifyOptions::Ssh {
-        program: "ssh-keygen".into(),
+        program: ssh_keygen.as_os_str().into(),
         program_arguments: Vec::new(),
         environment: Vec::new(),
         allowed_signers: signature::fixture("ssh-allowed-signers"),

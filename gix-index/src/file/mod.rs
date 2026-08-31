@@ -110,6 +110,16 @@ mod access {
         pub fn checksum(&self) -> Option<gix_hash::ObjectId> {
             self.checksum
         }
+
+        /// Return the sparse-checkout configuration that was active when this file was opened.
+        pub fn sparse_options(&self) -> crate::sparse::Options {
+            self.sparse_options
+        }
+
+        /// Return the sparse-checkout mode derived from the configuration active when this file was opened.
+        pub fn sparse_mode(&self) -> crate::sparse::Mode {
+            self.sparse_options.sparse_mode()
+        }
     }
 }
 

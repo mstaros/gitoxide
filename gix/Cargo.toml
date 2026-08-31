@@ -112,7 +112,7 @@ sha256 = [
 command = ["dep:gix-command", "gix-object/signature"]
 
 ## Obtain information similar to `git status`.
-status = ["gix-status", "dirwalk", "index", "blob-diff", "gix-diff/index"]
+status = ["dep:gix-status", "gix-status/worktree-rewrites", "dirwalk", "index", "blob-diff", "gix-diff/index"]
 
 ## Utilities for interrupting computations and cleaning up tempfiles.
 interrupt = ["dep:signal-hook", "gix-tempfile/signals", "dep:parking_lot"]
@@ -128,7 +128,7 @@ dirwalk = ["dep:gix-dir", "attributes", "excludes"]
 credentials = ["dep:gix-credentials", "dep:gix-prompt", "dep:gix-negotiate"]
 
 ## Various ways to alter the worktree makeup by checkout and reset.
-worktree-mutation = ["attributes", "dep:gix-worktree-state"]
+worktree-mutation = ["attributes", "dep:gix-worktree-state", "dep:gix-status"]
 
 ## Retrieve a worktree stack for querying exclude information
 excludes = ["dep:gix-ignore", "dep:gix-worktree", "index"]
@@ -382,9 +382,7 @@ gix-hashtable = { version = "^0.16.0", path = "../gix-hashtable" }
 gix-commitgraph = { version = "^0.38.0", path = "../gix-commitgraph" }
 gix-pathspec = { version = "^0.19.0", path = "../gix-pathspec", optional = true }
 gix-submodule = { version = "^0.33.0", path = "../gix-submodule", optional = true }
-gix-status = { version = "^0.33.0", path = "../gix-status", optional = true, features = [
-    "worktree-rewrites",
-] }
+gix-status = { version = "^0.33.0", path = "../gix-status", optional = true }
 gix-command = { version = "^0.9.2", path = "../gix-command", optional = true }
 
 gix-worktree-stream = { version = "^0.35.0", path = "../gix-worktree-stream", optional = true }

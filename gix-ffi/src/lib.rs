@@ -25,9 +25,11 @@ use interoptopus::ffi;
 use interoptopus::inventory::RustInventory;
 use interoptopus::{builtins_string, builtins_vec, guard, service};
 
+mod byte_stream;
 mod index;
 mod references;
 mod status;
+pub use byte_stream::ByteReader;
 pub use index::IndexEntryRecord;
 pub use references::{BranchRecord, OptionalObjectId, ReferenceLockLease, ReferenceRecord};
 pub use status::StatusRecord;
@@ -1238,5 +1240,6 @@ pub fn ffi_inventory() -> RustInventory {
         .register(builtins_vec!(StatusRecord))
         .register(service!(ReferenceLockLease))
         .register(service!(Repo))
+        .register(service!(ByteReader))
         .validate()
 }

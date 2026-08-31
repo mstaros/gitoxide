@@ -10,6 +10,8 @@ impl Index {
     /// The `index.skipHash` key.
     pub const SKIP_HASH: keys::Boolean = keys::Boolean::new_boolean("skipHash", &config::Tree::INDEX)
         .with_deviation("also used to skip the hash when reading, even if a hash exists in the index file");
+    /// The `index.sparse` key.
+    pub const SPARSE: keys::Boolean = keys::Boolean::new_boolean("sparse", &config::Tree::INDEX);
 }
 
 /// The `index.threads` key.
@@ -49,7 +51,7 @@ impl Section for Index {
     }
 
     fn keys(&self) -> &[&dyn Key] {
-        &[&Self::THREADS, &Self::SKIP_HASH]
+        &[&Self::THREADS, &Self::SKIP_HASH, &Self::SPARSE]
     }
 }
 

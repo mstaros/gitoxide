@@ -1,5 +1,5 @@
 /// Configuration related to sparse indexes.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     /// If true, certain entries in the index will be excluded / skipped for certain operations,
     /// based on the ignore patterns in the `.git/info/sparse-checkout` file. These entries will
@@ -46,7 +46,7 @@ impl Options {
 }
 
 /// Describes the configuration how a sparse index should be written, or if one should be written at all.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// index with DIR entries for exclusion and included entries, directory-only include patterns in `.git/info/sparse-checkout` file.
     IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs,
@@ -54,6 +54,6 @@ pub enum Mode {
     IncludeDirectoriesStoreAllEntriesSkipUnmatched,
     /// index with all file entries and skip-worktree flags for exclusion, `ignore` patterns to include entries in `.git/info/sparse-checkout` file.
     IncludeByIgnorePatternStoreAllEntriesSkipUnmatched,
-    /// index with all entries, non is excluded, `.git/info/sparse-checkout` file is not considered, a regular index.
+    /// index with all entries, none is excluded, `.git/info/sparse-checkout` file is not considered, a regular index.
     Disabled,
 }

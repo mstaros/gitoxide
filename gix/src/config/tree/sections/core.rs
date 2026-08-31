@@ -66,6 +66,12 @@ impl Core {
         keys::UnsignedInteger::new_unsigned_integer("repositoryFormatVersion", &config::Tree::CORE);
     /// The `core.symlinks` key.
     pub const SYMLINKS: keys::Boolean = keys::Boolean::new_boolean("symlinks", &config::Tree::CORE);
+    /// The `core.sparseCheckout` key.
+    pub const SPARSE_CHECKOUT: keys::Boolean =
+        keys::Boolean::new_boolean("sparseCheckout", &config::Tree::CORE);
+    /// The `core.sparseCheckoutCone` key.
+    pub const SPARSE_CHECKOUT_CONE: keys::Boolean =
+        keys::Boolean::new_boolean("sparseCheckoutCone", &config::Tree::CORE);
     /// The `core.trustCTime` key.
     pub const TRUST_C_TIME: keys::Boolean = keys::Boolean::new_boolean("trustCTime", &config::Tree::CORE);
     /// The `core.worktree` key.
@@ -135,6 +141,8 @@ impl Section for Core {
             &Self::PRECOMPOSE_UNICODE,
             &Self::REPOSITORY_FORMAT_VERSION,
             &Self::SYMLINKS,
+            &Self::SPARSE_CHECKOUT,
+            &Self::SPARSE_CHECKOUT_CONE,
             &Self::TRUST_C_TIME,
             &Self::WORKTREE,
             &Self::PROTECT_HFS,

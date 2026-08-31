@@ -67,12 +67,12 @@ fn baseline() -> crate::Result {
     let mut buf = Vec::new();
     // Due to the way our setup differs from gits dynamic stack (which involves trying to read files from disk
     // by path) we can only test one case baseline, so we require multiple platforms (or filesystems) to run this.
-    let case = if gix_fs::Capabilities::probe("../.git".as_ref()).ignore_case {
+    let (mut group, mut collection, base, input) = baseline::user_attributes("basics")?;
+    let case = if gix_fs::Capabilities::probe_dir(&base).ignore_case {
         Case::Fold
     } else {
         Case::Sensitive
     };
-    let (mut group, mut collection, base, input) = baseline::user_attributes("basics")?;
 
     // Note that we have to hard-code these files for a lack of dynamic stack.
     // This isn't a problem as non-matching prefixes will simply be ignored.
