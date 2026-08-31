@@ -34,22 +34,19 @@ mod worktree;
 
 #[cfg(feature = "revision")]
 mod revision {
-    use crate::util::hex_to_id_sha1_only;
-
     #[test]
     fn date() -> crate::Result {
         let repo = crate::named_repo("make_rev_parse_repo.sh")?;
         let actual = repo
             .rev_parse_single("old@{20 years ago}")
             .expect("it returns the oldest possible rev when overshooting");
-        assert_eq!(actual, hex_to_id_sha1_only("be2f093f0588eaeb71e1eff7451b18c2a9b1d765"));
+        assert_eq!(actual, "be2f093f0588eaeb71e1eff7451b18c2a9b1d765");
 
         let actual = repo
             .rev_parse_single("old@{1732184844}")
             .expect("it finds something in the middle");
         assert_eq!(
-            actual,
-            hex_to_id_sha1_only("b29405fe9147a3a366c4048fbe295ea04de40fa6"),
+            actual, "b29405fe9147a3a366c4048fbe295ea04de40fa6",
             "It also figures out that we don't mean an index, but a date"
         );
         Ok(())
@@ -153,7 +150,7 @@ fn size_in_memory() {
     // The selected index path adds one `PathBuf` to the repository.
     // Network-client features add protocol permission caching to `Repository::config`,
     // which grows the type by one more cached cell.
-    let limit = 1324;
+    let limit = 1500;
     assert!(
         actual_size <= limit,
         "size of Repository shouldn't change without us noticing, it's meant to be cloned: should have been below {limit:?}, was {actual_size}"

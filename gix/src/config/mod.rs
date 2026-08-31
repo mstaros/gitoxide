@@ -234,7 +234,7 @@ pub mod checkout_options {
 }
 
 ///
-#[cfg(feature = "attributes")]
+#[cfg(feature = "command")]
 pub mod command_context {
     use crate::config;
 
@@ -474,6 +474,8 @@ pub mod commit_signature {
     pub enum Error {
         #[error(transparent)]
         Time(#[from] super::time::Error),
+        #[error(transparent)]
+        SetValue(#[from] gix_config::file::set_raw_value::Error),
         #[error(transparent)]
         Span(#[from] gix_config::parse::span::Error),
     }

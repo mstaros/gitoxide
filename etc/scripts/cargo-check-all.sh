@@ -2,7 +2,10 @@
 
 set -eux
 
-cargo check --workspace
+cargo check --workspace --all-targets
+for manifest in gix-*/fuzz/Cargo.toml; do
+    cargo check --manifest-path "$manifest" --all-targets
+done
 cargo check --no-default-features --features small
 etc/scripts/check-gix-crates-without-hash-features.sh
 etc/scripts/check-gix-crates-require-hash-features.sh
@@ -31,6 +34,7 @@ cargo check -p gitoxide-core --features gix/sha1,async-client
 cargo check -p gix-pack --no-default-features --features sha1
 cargo check -p gix-pack --no-default-features --features sha1,generate
 cargo check -p gix-pack --no-default-features --features sha1,streaming-input
+cargo check -p gix-hash --no-default-features --features sha1,bstr
 cargo check -p gix-hash --all-features
 cargo check -p gix-object --all-features
 cargo check -p gix-attributes --features serde

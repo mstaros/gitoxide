@@ -1,5 +1,9 @@
 # Development Guide
 
+See the [contribution guide] for requirements to meet before beginning implementation.
+
+[contribution guide]: https://github.com/GitoxideLabs/gitoxide/blob/main/CONTRIBUTING.md
+
 ## Practices
 
  * **test-first development**
@@ -12,6 +16,12 @@
       * Run the same test against git whenever feasible to assure git agrees with our implementation.
         See `gix-glob` for examples.
    * *use libgit2* test fixtures and cases where appropriate, or learn from them.
+ * **fuzzing**
+   * fuzz parsers, algorithms, and other code that processes untrusted input.
+   * add a regression test for every issue found before fixing it.
+ * **benchmarks**
+   * benchmark performance-sensitive changes before and after implementation.
+   * use representative inputs and compare against git when applicable.
  * **safety first**
    * handle all errors, never `unwrap()`. If needed, `expect("why")`.
    * provide an error chain and make it easy to understand what went wrong.
@@ -41,8 +51,9 @@ Features or other changes that are visible and people should know about look lik
   And here is how it's used and some more details.
 - fix: don't panic when calling `foo()` in a bare repository. (#456)
 
-When a changelog-worthy commit touches multiple crates, use the crate that should receive the changelog entry as the conventional
-commit _scope_, for example `feat(gix-odb)!: add a new object lookup API` or `fix(gix-ref)!: reject invalid reference names`.
+A conventional commit _scope_ naming the crate that should receive the changelog entry is required whenever a changelog-worthy
+commit touches paths outside that crate. If in doubt, always add the scope, for example
+`feat(gix-odb)!: add a new object lookup API` or `fix(gix-ref)!: reject invalid reference names`.
 
 Everything else, particularly refactors or chores, don't use _conventional commits_ as these don't affect users of the API.
 Examples could be:
@@ -113,9 +124,9 @@ Parameters which are not available in git or specific to `gitoxide` or the needs
       needs a lot of resources and threads will do just fine.~~
       * Support async out of the box without locking it into particular traits using conditional complication. This will make integrating
         into an async codebase easier, which we assume is given on the server side _these days_.
-  * **usage of `bisync`**
-    * Use async-shaped source with `bisync::asynchronous` or `bisync::synchronous` for shared blocking and async call paths and tests. Select the
-      mode at each integration point so both variants can coexist while being generated from one implementation that cannot drift.
+  * **shared blocking and async code**
+    * Use async-shaped source with the `keep`, `discard`, and `sync` attributes from `gix-macros`. Alias them in a local `bisync` module at each
+      integration point so both variants can coexist while being generated from one implementation that cannot drift.
 * **`Default` trait implementations**
   * These can change only if the effect is contained within the callers process.
     This means **changing the default of a file version** is a **breaking change**.
