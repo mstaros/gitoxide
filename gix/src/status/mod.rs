@@ -151,6 +151,8 @@ pub mod is_dirty {
         HeadTreeId(#[from] crate::reference::head_tree_id::Error),
         #[error(transparent)]
         OpenWorktreeIndex(#[from] crate::worktree::open_index::Error),
+        #[error(transparent)]
+        SparseIndex(#[from] super::sparse_index::Error),
     }
 
     impl Repository {
@@ -166,6 +168,10 @@ pub mod is_dirty {
         //                    stop once there is a change flag, but without using the iterator for
         //                    optimal resource usage.
         pub fn is_dirty(&self) -> Result<bool, Error> {
+            let index = super::sparse_index::expand(
+                self,
+                crate::worktree::IndexPersistedOrInMemory::Persisted(self.index_or_empty()?),
+            )?;
             {
                 let head_tree_id = self.head_tree_id_or_empty()?;
                 let mut index_is_dirty = false;
@@ -183,7 +189,7 @@ pub mod is_dirty {
                 // Run this first as there is a high likelihood to find something, and it's very fast.
                 self.tree_index_status(
                     &head_tree_id,
-                    &*self.index_or_empty()?,
+                    &index,
                     Some(&mut pathspec),
                     crate::status::tree_index::TrackRenames::Disabled,
                     |_, _, _| {
@@ -197,6 +203,7 @@ pub mod is_dirty {
             }
             let is_dirty = self
                 .status(gix_features::progress::Discard)?
+                .index(index)
                 .index_worktree_rewrites(None)
                 .index_worktree_submodules(crate::status::Submodule::AsConfigured { check_dirty: true })
                 .index_worktree_options_mut(|opts| {
@@ -211,6 +218,34 @@ pub mod is_dirty {
     }
 }
 
+/// In-memory expansion support for sparse indexes consumed by status.
+pub mod sparse_index {
+    use crate::{Repository, worktree::IndexPersistedOrInMemory};
+
+    /// The error returned when preparing a sparse index for status comparisons.
+    #[derive(Debug, thiserror::Error)]
+    #[expect(missing_docs)]
+    pub enum Error {
+        #[error(transparent)]
+        Config(#[from] crate::config::boolean::Error),
+        #[error(transparent)]
+        Expand(#[from] gix_index::sparse::expand::Error),
+    }
+
+    pub(crate) fn expand(
+        repo: &Repository,
+        index: IndexPersistedOrInMemory,
+    ) -> Result<IndexPersistedOrInMemory, Error> {
+        if !index.is_sparse() {
+            return Ok(index);
+        }
+        let validate = repo.config.protect_options()?;
+        let mut index = index.into_owned();
+        index.expand_sparse_index(repo, validate)?;
+        Ok(index.into())
+    }
+}
+
 ///
 pub mod into_iter {
     /// The error returned by [status::Platform::into_iter()](crate::status::Platform::into_iter()).
@@ -219,6 +254,8 @@ pub mod into_iter {
     pub enum Error {
         #[error(transparent)]
         Index(#[from] crate::worktree::open_index::Error),
+        #[error(transparent)]
+        SparseIndex(#[from] super::sparse_index::Error),
         #[error("Failed to spawn producer thread")]
         #[cfg(feature = "parallel")]
         SpawnThread(#[source] std::io::Error),

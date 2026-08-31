@@ -59,6 +59,122 @@ fn cone_mode_matches_git_and_disable_restores_everything() -> crate::Result {
 }
 
 #[test]
+fn sparse_index_matches_git_and_transitions_back_to_full_indexes() -> crate::Result {
+    let temp = gix_testtools::tempfile::TempDir::new()?;
+    let git_root = temp.path().join("git-baseline");
+    let gix_root = temp.path().join("gix-subject");
+    make_repository(&git_root)?;
+    make_repository(&gix_root)?;
+
+    git(
+        &git_root,
+        &["sparse-checkout", "set", "--cone", "--sparse-index", "src/deep"],
+    )?;
+    let mut repo = open(&gix_root)?;
+    repo.set_sparse_checkout(
+        gix::index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs,
+        ["src/deep"],
+    )?;
+
+    let git_repo = open(&git_root)?;
+    assert!(repo.open_index()?.is_sparse());
+    assert_eq!(sparse_directory_entries(&repo)?, sparse_directory_entries(&git_repo)?);
+    assert_eq!(worktree_files(&gix_root)?, worktree_files(&git_root)?);
+    assert_eq!(repo.list_sparse_checkout()?, git_repo.list_sparse_checkout()?);
+    let status = repo
+        .status(gix::progress::Discard)?
+        .into_iter(Vec::new())?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(status.is_empty());
+    assert!(!repo.is_dirty()?);
+
+    let patterns = ["/other/"];
+    git(
+        &git_root,
+        &["sparse-checkout", "set", "--no-cone", patterns[0]],
+    )?;
+    repo.set_sparse_checkout(
+        gix::index::sparse::Mode::IncludeByIgnorePatternStoreAllEntriesSkipUnmatched,
+        patterns,
+    )?;
+    let git_repo = open(&git_root)?;
+    assert!(!repo.open_index()?.is_sparse());
+    assert_eq!(skip_paths(&repo)?, skip_paths(&git_repo)?);
+    assert_eq!(worktree_files(&gix_root)?, worktree_files(&git_root)?);
+
+    git(
+        &git_root,
+        &["sparse-checkout", "set", "--cone", "--sparse-index", "src/deep"],
+    )?;
+    repo.set_sparse_checkout(
+        gix::index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs,
+        ["src/deep"],
+    )?;
+    assert!(repo.open_index()?.is_sparse());
+
+    git(&git_root, &["sparse-checkout", "disable"])?;
+    repo.disable_sparse_checkout()?;
+    let git_repo = open(&git_root)?;
+    assert!(!repo.open_index()?.is_sparse());
+    assert_eq!(tracked_paths(&repo)?, tracked_paths(&git_repo)?);
+    assert_eq!(worktree_files(&gix_root)?, worktree_files(&git_root)?);
+    assert_eq!(repo.config_snapshot().boolean("index.sparse"), Some(false));
+    Ok(())
+}
+
+#[test]
+fn sparse_index_preserves_staged_changes_outside_the_cone() -> crate::Result {
+    let temp = gix_testtools::tempfile::TempDir::new()?;
+    let git_root = temp.path().join("git-baseline");
+    let gix_root = temp.path().join("gix-subject");
+    make_repository(&git_root)?;
+    make_repository(&gix_root)?;
+
+    for root in [&git_root, &gix_root] {
+        std::fs::write(root.join("other/drop.txt"), "staged outside cone\n")?;
+        git(root, &["add", "other/drop.txt"])?;
+    }
+    let staged_id = git(&gix_root, &["rev-parse", ":other/drop.txt"])?
+        .trim()
+        .to_owned();
+
+    git(
+        &git_root,
+        &["sparse-checkout", "set", "--cone", "--sparse-index", "src/deep"],
+    )?;
+    let mut repo = open(&gix_root)?;
+    repo.set_sparse_checkout(
+        gix::index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs,
+        ["src/deep"],
+    )?;
+
+    let git_repo = open(&git_root)?;
+    assert_eq!(sparse_directory_entries(&repo)?, sparse_directory_entries(&git_repo)?);
+    assert!(repo.is_dirty()?);
+    let index = repo.open_index()?;
+    let other = index
+        .entries()
+        .iter()
+        .find(|entry| entry.path_in(index.path_backing()) == b"other/".as_bstr())
+        .expect("the excluded directory is compressed");
+    assert_eq!(other.id.to_hex().to_string(), sparse_entry_id(&git_repo, "other/")?);
+
+    repo.disable_sparse_checkout()?;
+    let index = repo.open_index()?;
+    let staged = index
+        .entries()
+        .iter()
+        .find(|entry| entry.path_in(index.path_backing()) == b"other/drop.txt".as_bstr())
+        .expect("disable expands the sparse directory");
+    assert_eq!(staged.id.to_hex().to_string(), staged_id);
+    assert_eq!(
+        std::fs::read_to_string(gix_root.join("other/drop.txt"))?,
+        "staged outside cone\n"
+    );
+    Ok(())
+}
+
+#[test]
 fn pattern_mode_matches_git_with_negation_anchoring_and_last_match_wins() -> crate::Result {
     let temp = gix_testtools::tempfile::TempDir::new()?;
     let git_root = temp.path().join("git-baseline");
@@ -294,6 +410,38 @@ fn tracked_paths(repo: &gix::Repository) -> crate::Result<Vec<String>> {
         .collect();
     paths.sort();
     Ok(paths)
+}
+
+fn sparse_directory_entries(repo: &gix::Repository) -> crate::Result<Vec<(String, String)>> {
+    let index = repo.open_index()?;
+    let mut entries = index
+        .entries()
+        .iter()
+        .filter(|entry| entry.mode == gix::index::entry::Mode::DIR)
+        .map(|entry| {
+            (
+                entry
+                    .path_in(index.path_backing())
+                    .to_str_lossy()
+                    .into_owned(),
+                entry.id.to_hex().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    Ok(entries)
+}
+
+fn sparse_entry_id(repo: &gix::Repository, path: &str) -> crate::Result<String> {
+    let index = repo.open_index()?;
+    Ok(index
+        .entries()
+        .iter()
+        .find(|entry| entry.path_in(index.path_backing()) == path.as_bytes().as_bstr())
+        .ok_or_else(|| format!("missing sparse entry {path:?}"))?
+        .id
+        .to_hex()
+        .to_string())
 }
 
 fn worktree_files(root: &Path) -> std::io::Result<Vec<String>> {

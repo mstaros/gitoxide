@@ -45,6 +45,7 @@ where
             None => IndexPersistedOrInMemory::Persisted(self.repo.index_or_empty()?),
             Some(index) => index,
         };
+        let index = crate::status::sparse_index::expand(self.repo, index)?;
 
         let obtain_tree_id = || -> Result<Option<gix_hash::ObjectId>, crate::status::into_iter::Error> {
             Ok(match self.head_tree {

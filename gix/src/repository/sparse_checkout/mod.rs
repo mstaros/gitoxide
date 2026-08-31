@@ -17,8 +17,10 @@ pub enum Error {
     MissingWorktree,
     #[error("The sparse-checkout mode {0:?} cannot be set by this API")]
     UnsupportedMode(gix_index::sparse::Mode),
-    #[error("Sparse indexes containing directory entries are not supported")]
-    SparseIndexUnsupported,
+    #[error("Could not expand the sparse index")]
+    SparseIndexExpand(#[source] gix_index::sparse::expand::Error),
+    #[error("Could not compress the sparse index")]
+    SparseIndexCompress(#[source] gix_index::sparse::compress::Error),
     #[error("Sparse checkout cannot be changed while the index contains unmerged entries")]
     UnmergedIndex,
     #[error("Invalid sparse-checkout pattern {pattern:?}: {reason}")]
@@ -122,9 +124,10 @@ impl crate::Repository {
     /// includes a path and a leading exclamation mark excludes it. The last matching pattern
     /// wins and unmatched paths are excluded.
     ///
-    /// Sparse-index directory entries are deliberately not produced. Use
-    /// IncludeDirectoriesStoreAllEntriesSkipUnmatched for cone mode or
-    /// IncludeByIgnorePatternStoreAllEntriesSkipUnmatched for pattern mode.
+    /// Use IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs for Git-compatible
+    /// `--sparse-index` cone mode, IncludeDirectoriesStoreAllEntriesSkipUnmatched for
+    /// a full cone-mode index, or IncludeByIgnorePatternStoreAllEntriesSkipUnmatched
+    /// for pattern mode.
     pub fn set_sparse_checkout(
         &mut self,
         mode: gix_index::sparse::Mode,
@@ -134,10 +137,18 @@ impl crate::Repository {
         let mut index = self
             .open_index()
             .map_err(|err| Error::OpenIndex(Box::new(err)))?;
+        let validate = self
+            .config
+            .protect_options()
+            .map_err(|err| Error::StatusSetup(Box::new(err)))?;
+        index
+            .expand_sparse_index(&*self, validate)
+            .map_err(Error::SparseIndexExpand)?;
         reject_unrepresentable_index(&index)?;
 
         let definition = match mode {
-            gix_index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched => {
+            gix_index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs
+            | gix_index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched => {
                 let directories = normalize_cone_directories(self, items.into_iter().map(Into::into))?;
                 let bytes = cone_definition(&directories);
                 Definition::Cone { directories, bytes }
@@ -257,7 +268,15 @@ impl crate::Repository {
             write_index(&mut index)?;
         }
 
-        enable_sparse_config(self, mode)?;
+        if mode == gix_index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs {
+            index
+                .convert_to_sparse_index(|tree| gix_object::Write::write(&*self, tree))
+                .map_err(Error::SparseIndexCompress)?;
+            enable_sparse_config(self, mode)?;
+            write_index(&mut index)?;
+        } else {
+            enable_sparse_config(self, mode)?;
+        }
         Ok(())
     }
 
@@ -271,6 +290,13 @@ impl crate::Repository {
         let mut index = self
             .open_index()
             .map_err(|err| Error::OpenIndex(Box::new(err)))?;
+        let validate = self
+            .config
+            .protect_options()
+            .map_err(|err| Error::StatusSetup(Box::new(err)))?;
+        index
+            .expand_sparse_index(&*self, validate)
+            .map_err(Error::SparseIndexExpand)?;
         reject_unrepresentable_index(&index)?;
 
         let paths = index_paths(&index);
@@ -339,9 +365,6 @@ impl Definition {
 }
 
 fn reject_unrepresentable_index(index: &gix_index::File) -> Result<(), Error> {
-    if index.is_sparse() {
-        return Err(Error::SparseIndexUnsupported);
-    }
     if index.entries().iter().any(|entry| entry.stage_raw() != 0) {
         return Err(Error::UnmergedIndex);
     }
@@ -991,13 +1014,26 @@ fn enable_sparse_config(
         "core",
         None,
         "sparseCheckoutCone",
-        if mode == gix_index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched {
+        if matches!(
+            mode,
+            gix_index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs
+                | gix_index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched
+        ) {
             "true"
         } else {
             "false"
         },
     )?;
-    worktree.set_raw_value_by("index", None, "sparse", "false")?;
+    worktree.set_raw_value_by(
+        "index",
+        None,
+        "sparse",
+        if mode == gix_index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
     common.set_raw_value_by("extensions", None, "worktreeConfig", "true")?;
 
     write_config(&worktree_path, &worktree)?;
@@ -1015,6 +1051,9 @@ fn set_sparse_checkout_enabled(repo: &mut crate::Repository, enabled: bool) -> R
         "sparseCheckout",
         if enabled { "true" } else { "false" },
     )?;
+    if !enabled {
+        config.set_raw_value_by("index", None, "sparse", "false")?;
+    }
     write_config(&path, &config)?;
     repo.reload().map_err(Error::Reload)?;
     Ok(())
