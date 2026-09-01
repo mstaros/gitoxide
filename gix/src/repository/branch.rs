@@ -88,10 +88,12 @@ impl crate::Repository {
             }
         }
 
-        let checked_out = self.checked_out_branches().map_err(|err| match err {
-            super::worktree::CheckedOutBranchesError::WorktreeListing(err) => delete::Error::WorktreeListing(err),
-            super::worktree::CheckedOutBranchesError::OpenWorktreeRepo(err) => delete::Error::OpenWorktreeRepo(err),
-            super::worktree::CheckedOutBranchesError::FollowSymref(err) => delete::Error::FollowSymref(err),
+        // `checked_out_branches` reports through `Exn`, which wraps the typed error in context
+        // frames. Deletion translates each cause into its own vocabulary, so unwrap and match.
+        let checked_out = self.checked_out_branches().map_err(|err| match err.into_inner() {
+            super::worktree_admin::Error::Listing(err) => delete::Error::WorktreeListing(err),
+            super::worktree_admin::Error::OpenWorktreeRepo(err) => delete::Error::OpenWorktreeRepo(err),
+            super::worktree_admin::Error::FollowSymref(err) => delete::Error::FollowSymref(err),
         })?;
         for name in &names {
             if let Some(worktree_dirs) = checked_out.get(name) {

@@ -112,7 +112,6 @@ public sealed class IndexTests
         await Assert.That(entries.ContainsKey("tracked.txt")).IsTrue();
         await Assert.That(entries.ContainsKey("untracked.txt")).IsFalse();
 
-        fixture.Repository.RefreshIndex(force: false);
         fixture.Repository.RefreshIndex();
     }
 

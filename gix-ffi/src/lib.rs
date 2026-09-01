@@ -1005,11 +1005,14 @@ impl Repo {
 
     /// Physically reload and validate the repository index from disk.
     ///
-    /// Each FFI operation creates a fresh thread-local repository, so both
-    /// force modes observe the physical file instead of a retained snapshot.
-    pub fn refresh_index(&self, force: bool) -> ffi::Result<(), GixError> {
+    /// Each FFI operation creates a fresh thread-local repository, so this
+    /// observes the physical file instead of a retained snapshot.
+    ///
+    /// This does not restat the worktree against cached index entries; that is
+    /// `git update-index --refresh` and is a separate operation.
+    pub fn refresh_index(&self) -> ffi::Result<(), GixError> {
         let repo = self.inner.to_thread_local();
-        match index::refresh(&repo, force) {
+        match index::refresh(&repo) {
             Ok(()) => ffi::Ok(()),
             Err(err) => ffi::Err(err),
         }

@@ -66,6 +66,8 @@ mod state;
 mod submodule;
 mod thread_safe;
 pub(crate) mod worktree;
+/// Administrative access to registered linked worktrees.
+pub mod worktree_admin;
 
 ///
 mod new_commit {

@@ -84,6 +84,359 @@ fn custom_ref_namespace_created_in_linked_worktree_is_common() -> crate::Result 
     Ok(())
 }
 
+/// `worktrees()` answers "which worktrees can I use" and drops anything without a `gitdir` file.
+/// Administration needs the opposite: every registered directory, including the broken ones,
+/// since those are exactly what pruning removes.
+#[test]
+fn worktree_admin_entries_report_broken_registrations_that_worktrees_hides() -> crate::Result {
+    use gix::repository::worktree_admin::Condition;
+
+    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
+    let repo = gix::open_opts(fixture.path().join("repo"), crate::restricted())?;
+
+    let admin = |repo: &gix::Repository| -> crate::Result<Vec<(String, Condition)>> {
+        Ok(repo
+            .worktree_admin_entries()?
+            .into_iter()
+            .map(|entry| (entry.id.to_string(), entry.condition))
+            .collect())
+    };
+
+    // The fixture creates `wt-deleted` and then removes its checkout, leaving the registration
+    // behind. That is a prunable entry which the filtered view cannot distinguish from a healthy
+    // one, because the `gitdir` file it filters on is still present.
+    let baseline = admin(&repo)?;
+    assert_eq!(
+        baseline
+            .iter()
+            .find(|(id, _)| id == "wt-deleted")
+            .map(|(_, condition)| condition),
+        Some(&Condition::CheckoutMissing),
+        "a checkout deleted behind git's back is reported as such: {baseline:?}"
+    );
+    assert!(
+        repo.worktrees()?.iter().any(|proxy| proxy.id() == "wt-deleted"),
+        "yet worktrees() lists it, since its gitdir file survived"
+    );
+
+    let entries = repo.worktree_admin_entries()?;
+    let locked = entries
+        .iter()
+        .find(|entry| entry.is_locked())
+        .expect("the fixture locks one worktree");
+    assert_eq!(
+        locked.id, "wt-c-locked",
+        "lock state is reported without needing a second call"
+    );
+    assert!(
+        locked.gitdir_modified.is_some(),
+        "the staleness signal is available for every readable entry"
+    );
+
+    // Break one entry the way an interrupted removal would: point its `gitdir` at a checkout
+    // that is not there. Note we must not delete the real checkout — a linked worktree records an
+    // absolute path, so a "writable" copy of this fixture still points back at the shared
+    // read-only one, and removing it would poison every other test that uses it.
+    let admin_dir = repo.common_dir().join("worktrees").join("wt-a");
+    std::fs::write(admin_dir.join("gitdir"), b"/vanished/wt-a/.git\n")?;
+
+    let after_removal = admin(&repo)?;
+    assert_eq!(
+        after_removal
+            .iter()
+            .find(|(id, _)| id == "wt-a")
+            .map(|(_, condition)| condition),
+        Some(&Condition::CheckoutMissing),
+        "a checkout that vanished is reported rather than skipped"
+    );
+    assert!(
+        repo.worktrees()?.iter().any(|proxy| proxy.id() == "wt-a"),
+        "worktrees() still lists it, because its gitdir file is intact"
+    );
+
+    // Break another the way a partial `worktree add` would: no `gitdir` file at all.
+    std::fs::remove_file(repo.common_dir().join("worktrees").join("wt-b").join("gitdir"))?;
+
+    let after_gitdir_loss = admin(&repo)?;
+    assert_eq!(
+        after_gitdir_loss
+            .iter()
+            .find(|(id, _)| id == "wt-b")
+            .map(|(_, condition)| condition),
+        Some(&Condition::MissingGitdir),
+        "an entry with no gitdir file is reported"
+    );
+    assert!(
+        !repo.worktrees()?.iter().any(|proxy| proxy.id() == "wt-b"),
+        "worktrees() silently drops it, which is why administration cannot rely on that view"
+    );
+
+    Ok(())
+}
+
+/// `lock` and `unlock` are the two administrative writes that do not touch the checkout, so they
+/// are checked against a fixture Git itself locked, and read back through the same accessor
+/// `worktrees()` uses.
+#[test]
+fn worktrees_can_be_locked_and_unlocked() -> crate::Result {
+    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
+    let repo = gix::open_opts(fixture.path().join("repo"), crate::restricted())?;
+    let lock_reason = |repo: &gix::Repository, id: &str| -> Option<String> {
+        repo.worktree_admin_entries()
+            .expect("entries are readable")
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .expect("the worktree is registered")
+            .lock_reason
+            .map(|reason| reason.to_string())
+    };
+
+    // The fixture locks `wt-c-locked` with `git worktree lock --reason`, so we start by reading
+    // what Git wrote rather than only what we write ourselves.
+    assert_eq!(
+        lock_reason(&repo, "wt-c-locked").as_deref(),
+        Some("added with --lock"),
+        "a reason written by git is read back verbatim"
+    );
+
+    repo.unlock_worktree("wt-c-locked".into())?;
+    assert_eq!(
+        lock_reason(&repo, "wt-c-locked"),
+        None,
+        "unlocking clears it"
+    );
+    assert!(
+        repo.unlock_worktree("wt-c-locked".into()).is_err(),
+        "unlocking twice is an error, as in git, so a caller cannot mistake a no-op for success"
+    );
+
+    repo.lock_worktree("wt-a".into(), Some("held for a test".into()))?;
+    assert_eq!(
+        lock_reason(&repo, "wt-a").as_deref(),
+        Some("held for a test"),
+        "our own reason round-trips through the same reader"
+    );
+    assert!(
+        repo.lock_worktree("wt-a".into(), None).is_err(),
+        "locking an already-locked worktree is an error rather than a silent replacement"
+    );
+
+    repo.unlock_worktree("wt-a".into())?;
+    repo.lock_worktree("wt-a".into(), None)?;
+    assert_eq!(
+        lock_reason(&repo, "wt-a").as_deref(),
+        Some(""),
+        "a lock without a reason is still a lock, with an empty reason"
+    );
+
+    assert!(
+        repo.lock_worktree("no-such-worktree".into(), None).is_err(),
+        "an unregistered name is rejected"
+    );
+    Ok(())
+}
+
+/// The load-bearing direction: Git must accept what we register. Reading our own writes proves
+/// only self-consistency, so this shells out to `git worktree list` and to `git status` inside the
+/// new checkout.
+#[test]
+fn added_worktrees_are_accepted_by_git() -> crate::Result {
+    use gix::repository::worktree_admin::add;
+
+    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
+    let repo = gix::open_opts(fixture.path().join("repo"), crate::restricted())?;
+    let target = fixture.path().join("registered-by-gix");
+
+    let outcome = repo.add_worktree(
+        &target,
+        add::Attachment::DetachedAt(repo.head_id()?.detach()),
+        add::Options::default(),
+    )?;
+    assert_eq!(outcome.id, "registered-by-gix", "the id follows the directory name");
+    assert!(
+        outcome.admin_dir.join("gitdir").is_file()
+            && outcome.admin_dir.join("commondir").is_file()
+            && outcome.admin_dir.join("HEAD").is_file(),
+        "the administrative files are all written"
+    );
+    assert!(
+        outcome.checkout.join(".git").is_file(),
+        "and the checkout points back at them"
+    );
+
+    // Git's own view is the real test.
+    let listed = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(fixture.path().join("repo"))
+        .output()?;
+    assert!(listed.status.success(), "git worktree list succeeds");
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("registered-by-gix"),
+        "git lists the worktree we registered"
+    );
+
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&outcome.checkout)
+        .output()?;
+    assert!(
+        status.status.success(),
+        "git status works inside a checkout we registered: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    // Registering the same path twice is refused rather than silently taking it over.
+    assert!(
+        repo.add_worktree(
+            &target,
+            add::Attachment::DetachedAt(repo.head_id()?.detach()),
+            add::Options::default(),
+        )
+        .is_err(),
+        "a path already registered here is reported, not reused"
+    );
+
+    // A branch another worktree holds is refused, as git does.
+    let held: gix::refs::FullName = "refs/heads/wt-a".try_into()?;
+    assert!(
+        repo.add_worktree(
+            &fixture.path().join("would-steal-wt-a"),
+            add::Attachment::Branch(held),
+            add::Options::default(),
+        )
+        .is_err(),
+        "a branch checked out elsewhere cannot be taken"
+    );
+
+    // Options we accept for shape but do not implement must say so rather than be ignored.
+    let unsupported = repo.add_worktree(
+        &fixture.path().join("unsupported"),
+        add::Attachment::DetachedAt(repo.head_id()?.detach()),
+        add::Options {
+            checkout: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        unsupported.is_err(),
+        "requesting materialisation from the registration step is refused explicitly"
+    );
+    assert!(
+        !fixture.path().join("unsupported").exists(),
+        "and nothing was created before the refusal"
+    );
+    Ok(())
+}
+
+/// `prune` must find exactly what is broken and leave everything else alone, and `remove` must be
+/// safe to retry. The fixture ships one already-broken entry and one locked one, which is the
+/// distinction that matters: a lock outranks brokenness.
+#[test]
+fn broken_worktrees_are_pruned_and_removal_is_idempotent() -> crate::Result {
+    use gix::repository::worktree_admin::{add, prune, remove};
+
+    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
+    let repo = gix::open_opts(fixture.path().join("repo"), crate::restricted())?;
+
+    // Lock the entry the fixture already broke, so it is both prunable and protected.
+    repo.lock_worktree("wt-deleted".into(), Some("keep me".into()))?;
+    let dry = repo.prune_worktrees(prune::Options {
+        dry_run: true,
+        ..Default::default()
+    })?;
+    assert!(
+        dry.iter().all(|candidate| candidate.id != "wt-deleted"),
+        "a locked entry is never a candidate, however broken: {dry:?}"
+    );
+    repo.unlock_worktree("wt-deleted".into())?;
+
+    let dry = repo.prune_worktrees(prune::Options {
+        dry_run: true,
+        ..Default::default()
+    })?;
+    assert_eq!(
+        dry.iter().map(|c| c.id.to_string()).collect::<Vec<_>>(),
+        vec!["wt-deleted".to_string()],
+        "unlocked, it is the only broken entry the fixture has"
+    );
+    assert!(
+        dry.iter().all(|candidate| !candidate.removed),
+        "a dry run reports without removing"
+    );
+    assert!(
+        repo.common_dir().join("worktrees").join("wt-deleted").is_dir(),
+        "and really did not remove it"
+    );
+
+    // An expiry in the distant past protects everything, since nothing is that old.
+    let ancient = std::time::SystemTime::UNIX_EPOCH;
+    assert!(
+        repo.prune_worktrees(prune::Options {
+            dry_run: true,
+            expire: Some(ancient),
+        })?
+        .is_empty(),
+        "an expiry older than every entry excludes them all"
+    );
+
+    let pruned = repo.prune_worktrees(prune::Options::default())?;
+    assert_eq!(pruned.len(), 1, "one entry was actually removed");
+    assert!(pruned[0].removed);
+    assert!(
+        !repo.common_dir().join("worktrees").join("wt-deleted").is_dir(),
+        "and it is gone from disk"
+    );
+
+    // Removal of a healthy worktree we registered ourselves, then a retry.
+    let target = fixture.path().join("to-be-removed");
+    let outcome = repo.add_worktree(
+        &target,
+        add::Attachment::DetachedAt(repo.head_id()?.detach()),
+        add::Options::default(),
+    )?;
+    let removed = repo.remove_worktree(outcome.id.as_ref(), remove::Options::default())?;
+    assert_eq!(
+        removed,
+        remove::Outcome {
+            registration_removed: true,
+            checkout_removed: true
+        },
+        "both halves go"
+    );
+    assert!(!target.exists() && !outcome.admin_dir.exists());
+
+    assert_eq!(
+        repo.remove_worktree(outcome.id.as_ref(), remove::Options::default())?,
+        remove::Outcome {
+            registration_removed: false,
+            checkout_removed: false
+        },
+        "removing again succeeds and reports that nothing was left, so a retry after an \
+         interruption does not have to parse an error to know it is done"
+    );
+
+    // A locked worktree is refused without force, and yields to it.
+    let locked = repo.add_worktree(
+        &fixture.path().join("locked-one"),
+        add::Attachment::DetachedAt(repo.head_id()?.detach()),
+        add::Options {
+            lock: Some(Some("held".into())),
+            ..Default::default()
+        },
+    )?;
+    assert!(
+        repo.remove_worktree(locked.id.as_ref(), remove::Options::default())
+            .is_err(),
+        "a lock is honoured"
+    );
+    assert!(
+        repo.remove_worktree(locked.id.as_ref(), remove::Options { force: true })?
+            .registration_removed,
+        "and force overrides it"
+    );
+    Ok(())
+}
+
 mod with_core_worktree_config {
     use std::io::BufRead;
 

@@ -83,9 +83,12 @@ public sealed partial class GixRepository
         });
     }
 
-    /// <summary>Physically reloads and validates the index from disk.</summary>
-    public void RefreshIndex(bool force = true) =>
-        Invoke("RefreshIndex", repo => repo.RefreshIndex(force));
+    /// <summary>
+    /// Physically reloads and validates the index from disk. This does not
+    /// restat the worktree against cached index entries.
+    /// </summary>
+    public void RefreshIndex() =>
+        Invoke("RefreshIndex", repo => repo.RefreshIndex());
 
     /// <summary>
     /// Updates matching tracked index entries from the worktree and writes the

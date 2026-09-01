@@ -213,10 +213,7 @@ pub(crate) fn unstage(
     write_index(index, entries_changed)
 }
 
-pub(crate) fn refresh(
-    repo: &gix::Repository,
-    _force: bool,
-) -> Result<(), GixError> {
+pub(crate) fn refresh(repo: &gix::Repository) -> Result<(), GixError> {
     let exists = repo
         .index_path()
         .try_exists()

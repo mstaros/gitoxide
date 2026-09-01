@@ -256,14 +256,14 @@ fn update_index_changes_only_tracked_paths_and_refresh_reads_the_physical_file()
     assert!(entries.contains_key(b"tracked.txt".as_slice()));
     assert!(!entries.contains_key(b"untracked.txt".as_slice()));
     assert_ne!(direct_entry(&root.0, b"tracked.txt").0, baseline_id);
-    ok(repo.refresh_index(false));
+    ok(repo.refresh_index());
 
     let index_path = root.0.join(".git/index");
     let valid_index = std::fs::read(&index_path).expect("read valid index");
     std::fs::write(&index_path, b"not an index").expect("corrupt temporary index");
-    assert!(matches!(repo.refresh_index(true), ffi::Err(_)));
+    assert!(matches!(repo.refresh_index(), ffi::Err(_)));
     std::fs::write(&index_path, valid_index).expect("restore temporary index");
-    ok(repo.refresh_index(true));
+    ok(repo.refresh_index());
 }
 
 #[test]

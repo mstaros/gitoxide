@@ -484,3 +484,215 @@ Every public managed `LibGit2.Native` member is mapped to an equivalent GixSharp
 ### Dependencies
 
 All module issues above.
+## scripted_fixture_writable is not self-contained for worktree fixtures
+
+```issue
+id: 138558d4
+kind: bug
+severity: high
+status: open
+```
+
+A linked worktree records an **absolute** path in `.git/worktrees/<id>/gitdir`. `scripted_fixture_writable` copies the generated fixture into a temp directory, but the copied `gitdir` files still point at the original generated location under `tests/fixtures/generated-do-not-edit/`.
+
+So a "writable" copy of a worktree fixture is not self-contained: anything resolved *through* `gitdir` escapes the copy and lands in the shared read-only fixture.
+
+### How it bit
+
+A test induced `CheckoutMissing` by calling `remove_dir_all` on the checkout path reported for `wt-a`. That deleted `wt-a` from the shared generated fixture rather than from the test's own copy, and permanently broke `from_nonbare_parent_repo`, `from_nonbare_parent_repo_set_workdir` and `custom_ref_namespace_created_in_linked_worktree_is_common` for every subsequent run — including runs that made fresh copies, since the source was already damaged.
+
+Recovery required deleting `gix/tests/fixtures/generated-do-not-edit/make_worktree_repo` to force regeneration.
+
+### Why it is dangerous
+
+The failure is silent, delayed, and attributed to the wrong change. Nothing fails at the moment of damage; the next unrelated test run fails instead, in tests the author never touched.
+
+### Workaround in use
+
+Mutate only the administrative directory (`<repo>/.git/worktrees/<id>/...`), which really is inside the copy. Never mutate a path obtained by resolving `gitdir`. To simulate a vanished checkout, rewrite the `gitdir` file to name a path that does not exist rather than deleting the path it currently names.
+
+### Possible fixes
+
+- Have `scripted_fixture_writable` rewrite `gitdir` and `commondir` pointers to the copy after copying, making it genuinely self-contained.
+- Or generate worktree fixtures with `git worktree add --relative-paths` (Git >= 2.48), so pointers stay relative and survive copying. `make_worktree_relative_linking.sh` already exercises that form.
+- Or, at minimum, document the hazard next to `scripted_fixture_writable`.
+
+Relevant for the upcoming `add` / `remove` / `prune` / `move` / `repair` work, which is mutation testing against exactly this fixture shape.
+## Gitignored gix-ffi/.cargo/config.toml makes transaction worktrees silently generate wrong bindings
+
+```issue
+id: 0be88a6a
+kind: bug
+severity: high
+status: open
+```
+
+`gix-ffi/.cargo/config.toml` carries a `[patch.crates-io]` pointing `interoptopus` and `interoptopus_csharp` at the local checkout. That file is **gitignored**, so `git worktree add` never creates it and every transaction worktree starts without it.
+
+Cargo then resolves `interoptopus` from crates.io, whose generated `Vec<T>` lacks `AsSpan()` / `ToArray()`. Regenerating `Interop.cs` in that state silently reverts the checked-in bindings to a shape the hand-written managed code cannot compile against.
+
+### Why it is dangerous
+
+The Rust side compiles and **all 26 `gix-ffi` tests pass against the bad bindings**. `lib.rs` already warns about this class of problem: the omission surfaces only as a C# compile error. A green Rust suite is not evidence that generated bindings are correct.
+
+Observed symptom when it happened: 22 errors in `GixSharp.Tests` — 18x CS0411 (`ImmutableArrayExtensions.ToArray<T>` cannot infer type arguments) across five `GixRepository.*.cs` files, plus 4x CS9135 (`A constant value of type 'FfiObjectType' is expected`), none of them in lines that had been edited.
+
+It also silently re-resolved `gix-ffi/Cargo.lock`, bumping unrelated transitive dependencies, because the missing patch invalidated the recorded resolution.
+
+### Contributing factor
+
+The file's own comment documents this exact failure mode, and even explains that absolute paths are required *because transaction worktrees live outside the directory tree*. The hazard was understood; nothing makes the file present.
+
+### Possible fixes
+
+- Add `<Error Condition="!Exists('$(GixFfiCrateDir)/.cargo/config.toml')">` to the `BuildGixFfi` target in `GixSharp.csproj`, gated on `SkipCargoBuild` like the `cargo build` invocation beside it. `StageGixFfi` already uses this idiom for a missing native library. Converts an invisible failure into a loud one.
+- Or check in a template and copy it on first build.
+- Or have the worktree tooling copy machine-local gitignored config.
+
+### Related
+
+`gix-ffi` currently cannot be built correctly by anyone without a local `interoptopus` checkout: crates.io 0.16.4 is genuinely insufficient, not merely stale. That reproducibility constraint deserves recording independently of the worktree problem.
+## CRLF committed in fork-touched core files guarantees whole-file conflicts on upstream merges
+
+```issue
+id: af7e3693
+kind: bug
+severity: medium
+status: open
+```
+
+`git ls-files --eol` reports `i/crlf` for fork-touched core files, including `gix/Cargo.toml`, `gix/tests/gix/repository/mod.rs` and `gix/src/worktree/mod.rs`. Upstream keeps these as LF, so every line differs and Git cannot produce hunks.
+
+### How it bit
+
+Merging 348 upstream commits produced exactly two conflicts, and both were whole-file: each side spanned the entire file and both sides ended with identical content. Re-running the merge with `-Xignore-cr-at-eol` reduced it to a single five-line hunk of stale dependency versions.
+
+### Why it will get worse
+
+Only two files conflicted because only two had been touched by both sides. As the fork edits more core files, each becomes a guaranteed whole-file conflict against every future upstream merge. The cost grows with the fork's footprint.
+
+### Fix
+
+Repo-level `.gitattributes` with `* text=auto eol=lf`, `core.autocrlf=false` locally, then `git add --renormalize .`. The pattern already exists in `gix-ffi/.gitattributes`, and commit `d778a55e7` normalised that crate to LF, so the approach is established — it was simply never applied repo-wide.
+
+Note a root `.gitattributes` already exists; check what it covers before adding rules.
+
+### Caveat
+
+Renormalisation rewrites many files in one commit, so it should be its own change with nothing else in it, landed when no other work is in flight.
+## No guarded symbolic-ref write: compare_exchange_reference is object-only and set_head is unconditional
+
+```issue
+id: b660e063
+kind: issue
+severity: medium
+status: open
+```
+
+Two gaps found while surveying the ref layer for worktree administration. Neither is a defect in what exists; both are missing capability that `worktree add` will need.
+
+### No compare-and-swap for symbolic references
+
+`gix-ffi`'s `compare_exchange_reference` builds `PreviousValue::MustExistAndMatch(Target::Object(expected))`, so it can only guard an object target. There is no way to say "point `HEAD` at `refs/heads/x`, but only if it currently points at `refs/heads/y`".
+
+`gix-ref` itself models symbolic targets in `PreviousValue`, so the limit is in the FFI surface rather than the underlying store — worth confirming before designing around it.
+
+### `set_head` is unconditional
+
+`gix-ffi`'s `set_head` writes with `PreviousValue::Any`, so it always wins. That is correct for `git symbolic-ref HEAD <ref>` semantics, but it means a caller cannot detach or re-attach a worktree's `HEAD` safely against concurrent modification.
+
+### Why it matters here
+
+`git worktree add` writes a `HEAD` into the new administrative directory, and the resumable-materialisation path re-attaches an existing worktree's `HEAD` to a specific branch at a specific tip. Both want a guarded symbolic-ref write: unconditional writes make "finish what was interrupted" indistinguishable from "clobber what someone else did".
+
+Not blocking the read model, but decide before implementing `add`.
+## ReferenceLockLease has no stale-lock recovery: a crashed holder wedges its transaction forever
+
+```issue
+id: b66f8f9c
+kind: issue
+severity: high
+status: open
+```
+
+`gix-ffi/src/references.rs` implements the cooperative lock as a real Git lock file: `ReferenceLockLease { _markers: Vec<gix::lock::Marker> }`, acquired over a set of ref names and held for the lease's lifetime.
+
+`gix::lock::Marker` releases on `Drop`. A process killed while holding the lease leaves `<ref>.lock` on disk with no owner, no timestamp and no expiry, and nothing will ever remove it. The affected transaction is then permanently unable to acquire its own lock.
+
+### Why the design is otherwise sound
+
+The lock is taken on the transaction's `_created` marker ref, which the lifecycle publishes once and never modifies. No ordinary Git operation contends for it, so holding a physical lock across validation and mutation blocks nothing but other cooperating clients — which is the intent. The objection that a physical ref lock is the wrong mechanism does not hold for *this* ref. It would hold for a branch.
+
+### What is missing
+
+A stale-lock policy. Git's own lock files have the same property, and Git's answer is that operations are short. This lease is deliberately long, so it needs something Git does not provide:
+
+- an age-based break, requiring a timestamp the lock file does not currently carry; or
+- an owner record (pid plus host or boot id) so a dead holder can be distinguished from a live one; or
+- an explicit break-lock operation and a documented human procedure.
+
+### Undecided
+
+Whether this belongs in the consumer, as an age-based break over the file it already knows the path of, or in `gix-lock` as a supported break operation. Recorded here so the choice is made deliberately rather than discovered after a crash.
+
+### Related
+
+The lock path is now computed via `gix-ref`'s `reference_path_with_base`, so it correctly follows commondir-versus-worktree routing including namespaces.
+## Stale State::is_sparse doc comment, and tree-extension ordering blocks sparse-index byte parity
+
+```issue
+id: b3fc59d9
+kind: bug
+severity: low
+status: open
+```
+
+Two smaller findings from the same survey, both in sparse-index territory.
+
+### `State::is_sparse` doc comment is stale
+
+The doc says an index is sparse if it *contains at least one `Mode::DIR` entry*. That stopped being the whole truth once `decode/mod.rs` began ORing in the `sdir` extension marker:
+
+```rust
+is_sparse |= is_sparse_from_ext; // a marker is needed in case there are no directories
+```
+
+A sparse-marked index with no collapsed directories is now sparse, and correctly round-trips its `sdir` marker. The comment describes the old entry-derived rule only.
+
+This is not cosmetic: reading it led directly to a wrong diagnosis of the `v2_sparse_index_no_dirs` fixture, on the assumption the marker was being lost. It was not — the fixture's `TODO` had simply outlived its fix, and re-enabling it passed unchanged.
+
+### `roundtrips_sparse_index` cannot compare raw bytes
+
+`gix-index/tests/index/file/write.rs` keeps `compare_raw_bytes` commented out for the sparse round-trip, because Git orders tree-extension entries differently from gitoxide. State comparison passes; byte comparison is untested.
+
+Distinct from the `sdir` question, and still open. Byte-level parity is the stronger guarantee, and worth having for anything that writes an index Git will later read.
+## Transaction worktrees materialise 137 LICENSE symlinks as plain text files
+
+```issue
+id: a1e4c9be
+kind: bug
+severity: low
+status: open
+```
+
+Every `LICENSE-APACHE` and `LICENSE-MIT` in the repository — 137 files — shows as `typechange` in a transaction worktree: `deleted file mode 120000` / `new file mode 100644`, with an **unchanged blob hash**.
+
+Gitoxide stores per-crate licence files as symlinks to the two real files at the repository root. In a transaction worktree they are materialised as ordinary one-line text files whose content is the relative path, e.g. `../LICENSE-MIT`.
+
+### Cause
+
+`core.symlinks` is `true` in both the main checkout and the worktree, so this is not configuration. The process that ran `git worktree add` lacked the Windows privilege to create symlinks (`SeCreateSymbolicLink`, granted by Developer Mode), and Git silently fell back to writing plain files.
+
+### Impact
+
+Two effects, one benign and one not.
+
+Benign: the transaction tooling stages only known-modified paths, so the typechanges never reach a commit. Verified — the checkpoint and the full branch diff both show only the intended files. If a future tool staged everything, it would convert 137 symlinks to text files in the fork's history, and checkouts on Linux or macOS would then carry no licence text at all.
+
+Not benign: anything that *reads* licence text from inside a transaction worktree sees the string `../LICENSE-MIT` rather than a licence. Licence scanners, packaging steps and `cargo package` would all be misled.
+
+### Possible fixes
+
+- Enable Developer Mode, or grant the privilege to whatever launches the worktree tooling.
+- Or have the worktree tooling detect the fallback and warn, since the failure is silent today.
+- Or verify whether `cargo package` / `cargo publish` from a transaction worktree would embed the wrong content, and if so refuse to publish from one.
