@@ -437,6 +437,112 @@ fn broken_worktrees_are_pruned_and_removal_is_idempotent() -> crate::Result {
     Ok(())
 }
 
+/// `move` and `repair` are two halves of the same problem: keeping the checkout and its
+/// administrative directory pointing at each other. Moving is checked against real Git, and both
+/// directions of breakage are induced and repaired.
+#[test]
+fn worktrees_can_be_moved_and_repaired() -> crate::Result {
+    use gix::repository::worktree_admin::{add, r#move, repair};
+
+    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
+    let repo = gix::open_opts(fixture.path().join("repo"), crate::restricted())?;
+    let action = |repaired: &[repair::Repaired], id: &str| -> Option<repair::Action> {
+        repaired
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.action.clone())
+    };
+
+    let registered = repo.add_worktree(
+        &fixture.path().join("movable"),
+        add::Attachment::DetachedAt(repo.head_id()?.detach()),
+        add::Options::default(),
+    )?;
+
+    // Moving updates both pointers, and Git must agree afterwards.
+    let destination = fixture.path().join("moved-elsewhere");
+    let moved = repo.move_worktree(registered.id.as_ref(), &destination, r#move::Options::default())?;
+    assert_eq!(moved, destination);
+    assert!(!registered.checkout.exists(), "the old location is gone");
+    assert!(destination.join(".git").is_file(), "the new one is linked");
+
+    let listed = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(fixture.path().join("repo"))
+        .output()?;
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.contains("moved-elsewhere") && !listed.contains("movable"),
+        "git sees the worktree at its new path and not its old one: {listed}"
+    );
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&destination)
+        .output()?;
+    assert!(status.status.success(), "git status works there");
+
+    // An occupied destination and a locked worktree are both refused.
+    assert!(
+        repo.move_worktree(
+            registered.id.as_ref(),
+            &fixture.path().join("repo"),
+            r#move::Options::default()
+        )
+        .is_err(),
+        "an existing destination is refused"
+    );
+    repo.lock_worktree(registered.id.as_ref(), None)?;
+    assert!(
+        repo.move_worktree(
+            registered.id.as_ref(),
+            &fixture.path().join("nope"),
+            r#move::Options::default()
+        )
+        .is_err(),
+        "a locked worktree is refused"
+    );
+    repo.unlock_worktree(registered.id.as_ref())?;
+
+    // Direction one: the checkout lost its back-pointer. Repairable without being told anything.
+    std::fs::remove_file(destination.join(".git"))?;
+    let repaired = repo.repair_worktrees(&[])?;
+    assert_eq!(
+        action(&repaired, "movable"),
+        Some(repair::Action::BackPointerRewritten),
+        "a missing .git file is rewritten from the registration alone"
+    );
+    assert!(destination.join(".git").is_file());
+    assert_eq!(
+        action(&repo.repair_worktrees(&[])?, "movable"),
+        Some(repair::Action::NothingToDo),
+        "and repairing again finds nothing to do"
+    );
+
+    // Direction two: the registration points at a checkout that is gone. Not repairable blind.
+    let relocated = fixture.path().join("relocated-by-hand");
+    std::fs::rename(&destination, &relocated)?;
+    assert_eq!(
+        action(&repo.repair_worktrees(&[])?, "movable"),
+        Some(repair::Action::CheckoutMissing),
+        "nothing says where it went, so it is reported rather than guessed at"
+    );
+    assert_eq!(
+        action(&repo.repair_worktrees(&[relocated.as_path()])?, "movable"),
+        Some(repair::Action::GitdirRepointed),
+        "given the new path, the registration is repointed"
+    );
+
+    let listed = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(fixture.path().join("repo"))
+        .output()?;
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("relocated-by-hand"),
+        "and git follows it to the hand-moved location"
+    );
+    Ok(())
+}
+
 mod with_core_worktree_config {
     use std::io::BufRead;
 

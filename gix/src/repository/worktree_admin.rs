@@ -353,6 +353,101 @@ pub mod prune {
     }
 }
 
+/// Types for [`Repository::repair_worktrees()`](crate::Repository::repair_worktrees()).
+pub mod repair {
+    use std::path::PathBuf;
+
+    use crate::bstr::BString;
+
+    /// What was done to a single administrative entry.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Action {
+        /// The registration was already consistent.
+        NothingToDo,
+        /// The checkout's `.git` file was missing or wrong, and was rewritten.
+        BackPointerRewritten,
+        /// The `gitdir` file named a checkout that is gone, and was repointed at a path the
+        /// caller supplied.
+        GitdirRepointed,
+        /// The `gitdir` file names a checkout that is gone, and no replacement path was given.
+        ///
+        /// Nothing identifies where a vanished checkout went, so this cannot be repaired without
+        /// being told. Pass the new location to fix it.
+        CheckoutMissing,
+    }
+
+    /// What [`repair_worktrees()`](crate::Repository::repair_worktrees()) did to one entry.
+    #[derive(Debug, Clone)]
+    pub struct Repaired {
+        /// The administrative identifier.
+        pub id: BString,
+        /// Its administrative directory.
+        pub admin_dir: PathBuf,
+        /// What was done.
+        pub action: Action,
+    }
+
+    /// The error returned by [`repair_worktrees()`](crate::Repository::repair_worktrees()).
+    #[derive(Debug, thiserror::Error)]
+    #[expect(missing_docs)]
+    pub enum Error {
+        #[error("Could not read the registered worktrees")]
+        Listing(#[source] super::Error),
+        #[error("{path:?} does not look like a worktree checkout of this repository")]
+        NotACheckout { path: PathBuf },
+        #[error("Could not write {path:?}")]
+        Io {
+            path: PathBuf,
+            #[source]
+            source: std::io::Error,
+        },
+    }
+}
+
+/// Types for [`Repository::move_worktree()`](crate::Repository::move_worktree()).
+pub mod r#move {
+    use std::path::PathBuf;
+
+    use crate::bstr::BString;
+
+    /// The options of `git worktree move`.
+    #[derive(Debug, Default, Clone)]
+    pub struct Options {
+        /// `--force`: move even when the worktree is locked.
+        pub force: bool,
+    }
+
+    /// The error returned by [`move_worktree()`](crate::Repository::move_worktree()).
+    #[derive(Debug, thiserror::Error)]
+    #[expect(missing_docs)]
+    pub enum Error {
+        #[error("There is no linked worktree registered as {id:?}")]
+        NotFound { id: BString },
+        #[error("The worktree {id:?} is locked; pass `force` to move it anyway")]
+        Locked { id: BString, reason: BString },
+        #[error("The registration of {id:?} is broken; repair it before moving it")]
+        NotRegistered { id: BString },
+        #[error("{path:?} already exists")]
+        DestinationExists { path: PathBuf },
+        #[error("The worktree {id:?} contains submodules, which cannot be moved yet")]
+        ContainsSubmodules { id: BString },
+        #[error("Could not read the registered worktrees")]
+        Listing(#[source] super::Error),
+        #[error("Could not move the checkout to {path:?}")]
+        Move {
+            path: PathBuf,
+            #[source]
+            source: std::io::Error,
+        },
+        #[error("The checkout moved to {path:?}, but its pointers could not be updated; `repair` with that path will finish the job")]
+        Repoint {
+            path: PathBuf,
+            #[source]
+            source: std::io::Error,
+        },
+    }
+}
+
 /// The error returned by [`Repository::lock_worktree()`](crate::Repository::lock_worktree()) and
 /// [`Repository::unlock_worktree()`](crate::Repository::unlock_worktree()).
 #[derive(Debug, thiserror::Error)]
@@ -694,6 +789,172 @@ impl crate::Repository {
         Ok(out)
     }
 
+    /// Repair the two-way link between each registered checkout and its administrative directory.
+    ///
+    /// This is `git worktree repair [<path>...]`. There are two directions of breakage and they
+    /// are not symmetric:
+    ///
+    /// - A checkout whose `.git` file is missing or names the wrong administrative directory is
+    ///   repaired without help, because the registration still says where the checkout is.
+    /// - A registration whose `gitdir` names a checkout that is gone can only be repaired by being
+    ///   told where it went. Pass the new location in `moved_checkouts`; without it, such an entry
+    ///   is reported as [`Action::CheckoutMissing`](repair::Action::CheckoutMissing) and left alone.
+    ///
+    /// Every entry is reported, including the ones that needed nothing, so a caller can tell
+    /// "repaired" from "was already fine" from "cannot repair without more information".
+    pub fn repair_worktrees(
+        &self,
+        moved_checkouts: &[&std::path::Path],
+    ) -> Result<Vec<repair::Repaired>, Exn<repair::Error>> {
+        use repair::{Action, Error};
+
+        // Index the supplied paths by the administrative *identifier* their `.git` file names, so
+        // a moved checkout can be matched to the registration that lost track of it. The identifier
+        // is used rather than the full path because the two spellings need not match byte for byte:
+        // the `.git` file records forward slashes even on Windows, while entries come from
+        // `read_dir` with native separators, and either side may differ in prefix or normalisation.
+        let key = |path: &std::path::Path| -> Option<BString> {
+            path.file_name()
+                .map(|name| gix_path::into_bstr(std::path::Path::new(name)).into_owned())
+        };
+        let mut relocated = std::collections::BTreeMap::new();
+        for path in moved_checkouts {
+            let dot_git = path.join(".git");
+            let admin_dir = gix_discover::path::from_plain_file(dot_git.as_ref())
+                .transpose()
+                .ok()
+                .flatten()
+                .ok_or_else(|| {
+                    Error::NotACheckout {
+                        path: path.to_path_buf(),
+                    }
+                    .raise()
+                })?;
+            let id = key(&admin_dir).ok_or_else(|| {
+                Error::NotACheckout {
+                    path: path.to_path_buf(),
+                }
+                .raise()
+            })?;
+            relocated.insert(id, path.to_path_buf());
+        }
+
+        let mut out = Vec::new();
+        for entry in self
+            .worktree_admin_entries()
+            .map_err(|err| Error::Listing(err.into_inner()).raise())?
+        {
+            let action = match entry.condition {
+                Condition::Registered => Action::NothingToDo,
+                Condition::MissingGitdir => Action::CheckoutMissing,
+                Condition::CheckoutNotLinked => {
+                    let checkout = entry.checkout.clone().expect("a checkout path was read");
+                    write_dot_git_back_pointer(&checkout, &entry.admin_dir)
+                        .map_err(|source| Error::Io {
+                            path: checkout.join(".git"),
+                            source,
+                        })
+                        .map_err(ErrorExt::raise)?;
+                    Action::BackPointerRewritten
+                }
+                Condition::CheckoutMissing => match relocated.get(&entry.id) {
+                    None => Action::CheckoutMissing,
+                    Some(new_checkout) => {
+                        write_gitdir_pointer(&entry.admin_dir, new_checkout)
+                            .map_err(|source| Error::Io {
+                                path: entry.admin_dir.join("gitdir"),
+                                source,
+                            })
+                            .map_err(ErrorExt::raise)?;
+                        Action::GitdirRepointed
+                    }
+                },
+            };
+            out.push(repair::Repaired {
+                id: entry.id,
+                admin_dir: entry.admin_dir,
+                action,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Move the checkout of the linked worktree `id` to `destination`, updating both pointers.
+    ///
+    /// This is `git worktree move`. A locked worktree is refused without `force`, an existing
+    /// destination is refused outright, and the main worktree has no administrative directory so
+    /// naming it yields [`NotFound`](r#move::Error::NotFound).
+    ///
+    /// The directory is moved first and the pointers updated second. If the move succeeds and the
+    /// pointer update does not, the result is exactly the state
+    /// [`repair_worktrees()`](crate::Repository::repair_worktrees()) fixes when given the new
+    /// path — so a failure here is recoverable rather than a puzzle. The error says so.
+    ///
+    /// ### Divergence from Git
+    ///
+    /// Git refuses to move a worktree containing submodules, because their `gitdir` pointers would
+    /// also need rewriting. This refuses the same case rather than moving one and leaving the
+    /// submodules broken.
+    pub fn move_worktree(
+        &self,
+        id: &crate::bstr::BStr,
+        destination: &std::path::Path,
+        options: r#move::Options,
+    ) -> Result<PathBuf, Exn<r#move::Error>> {
+        use r#move::Error;
+
+        let entry = self
+            .worktree_admin_entries()
+            .map_err(|err| Error::Listing(err.into_inner()).raise())?
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| Error::NotFound { id: id.to_owned() }.raise())?;
+
+        if !options.force {
+            if let Some(reason) = &entry.lock_reason {
+                return Err(Error::Locked {
+                    id: entry.id.clone(),
+                    reason: reason.clone(),
+                }
+                .raise());
+            }
+        }
+        if !entry.condition.is_registered() {
+            return Err(Error::NotRegistered { id: entry.id.clone() }.raise());
+        }
+        let source = entry.checkout.clone().expect("a registered entry has a checkout");
+        if destination.exists() {
+            return Err(Error::DestinationExists {
+                path: destination.to_owned(),
+            }
+            .raise());
+        }
+        if source.join(".gitmodules").is_file() {
+            return Err(Error::ContainsSubmodules { id: entry.id.clone() }.raise());
+        }
+
+        std::fs::rename(&source, destination).map_err(|err| {
+            Error::Move {
+                path: destination.to_owned(),
+                source: err,
+            }
+            .raise()
+        })?;
+
+        // From here the checkout has already moved, so a failure is repairable rather than lost.
+        write_gitdir_pointer(&entry.admin_dir, destination)
+            .and_then(|()| write_dot_git_back_pointer(destination, &entry.admin_dir))
+            .map_err(|err| {
+                Error::Repoint {
+                    path: destination.to_owned(),
+                    source: err,
+                }
+                .raise()
+            })?;
+
+        Ok(destination.to_owned())
+    }
+
     /// Write every file that links `admin_dir` and `checkout` together, creating both directories.
     fn write_worktree_registration(
         &self,
@@ -711,11 +972,8 @@ impl crate::Repository {
         std::fs::create_dir_all(admin_dir).map_err(io(admin_dir))?;
         std::fs::create_dir_all(checkout).map_err(io(checkout))?;
 
-        // Git records an absolute path to the `.git` file, with forward slashes even on Windows.
         let dot_git = checkout.join(".git");
-        let mut gitdir = gix_path::to_unix_separators_on_windows(gix_path::into_bstr(dot_git.as_path())).into_owned();
-        gitdir.push(b'\n');
-        std::fs::write(admin_dir.join("gitdir"), &gitdir).map_err(io(&admin_dir.join("gitdir")))?;
+        write_gitdir_pointer(admin_dir, checkout).map_err(io(&admin_dir.join("gitdir")))?;
 
         // `commondir` is relative to the administrative directory, which is always two levels down.
         std::fs::write(admin_dir.join("commondir"), b"../..\n").map_err(io(&admin_dir.join("commondir")))?;
@@ -743,11 +1001,8 @@ impl crate::Repository {
             std::fs::write(admin_dir.join("locked"), &contents).map_err(io(&admin_dir.join("locked")))?;
         }
 
-        // The checkout points back with an absolute path, completing the two-way link.
-        let mut back_pointer = BString::from("gitdir: ");
-        back_pointer.extend_from_slice(&gix_path::to_unix_separators_on_windows(gix_path::into_bstr(admin_dir)));
-        back_pointer.push(b'\n');
-        std::fs::write(&dot_git, &back_pointer).map_err(io(&dot_git))?;
+        // The checkout points back at us, completing the two-way link.
+        write_dot_git_back_pointer(checkout, admin_dir).map_err(io(&dot_git))?;
         Ok(())
     }
 
@@ -791,6 +1046,27 @@ impl crate::Repository {
             .join(gix_path::from_bstr(id).as_ref());
         dir.is_dir().then_some(dir)
     }
+}
+
+/// Write `admin_dir/gitdir`, naming the `.git` file inside `checkout`.
+///
+/// Git records an absolute path here, with forward slashes even on Windows.
+fn write_gitdir_pointer(admin_dir: &std::path::Path, checkout: &std::path::Path) -> std::io::Result<()> {
+    let mut contents =
+        gix_path::to_unix_separators_on_windows(gix_path::into_bstr(checkout.join(".git"))).into_owned();
+    contents.push(b'\n');
+    std::fs::write(admin_dir.join("gitdir"), &contents)
+}
+
+/// Write the `.git` file inside `checkout`, naming `admin_dir`.
+///
+/// This is the other half of the two-way link, and the half `git worktree repair` restores when a
+/// checkout has been copied or its `.git` file lost.
+fn write_dot_git_back_pointer(checkout: &std::path::Path, admin_dir: &std::path::Path) -> std::io::Result<()> {
+    let mut contents = BString::from("gitdir: ");
+    contents.extend_from_slice(&gix_path::to_unix_separators_on_windows(gix_path::into_bstr(admin_dir)));
+    contents.push(b'\n');
+    std::fs::write(checkout.join(".git"), &contents)
 }
 
 /// Record the worktree directory under `HEAD` and every reference in its symbolic referent chain.
