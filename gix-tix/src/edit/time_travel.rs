@@ -2517,7 +2517,9 @@ mod tests {
 
     #[test]
     fn time_travel_materializes_only_the_pending_path_to_the_destination() -> gix_testtools::Result {
-        if !gix_testtools::signature::program_available("ssh-keygen") {
+        // See the note in `edit::head`: `program_available` cannot tell a signing-capable
+        // ssh-keygen from one that merely starts.
+        if gix_testtools::signature::ssh_keygen().is_none() {
             return Ok(());
         }
         let (_key_home, key) = gix_testtools::signature::ssh_private_key()?;

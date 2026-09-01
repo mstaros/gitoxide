@@ -294,12 +294,7 @@ members = [
     "gitoxide-core",
     "gix-hashtable",
     "gix-tui",
-    # `gix-tix` is deliberately not a workspace member in this fork. It is an optional dependency
-    # of the `gitoxide` binary behind the `tix` feature, nothing else depends on it, and we do not
-    # use the TUI. Excluding it keeps its 455 tests and its terminal dependency stack out of every
-    # build and validation run. Its files are left untouched so upstream merges never conflict.
-    # Five of its tests also require a working SSH signing program, which fails in sanitized
-    # environments where `gix_path::env::core_dir()` cannot find Git's bundled `ssh-keygen`.
+    "gix-tix",
     "gix-archive",
     "gix-worktree-stream",
     "gix-revwalk",

@@ -353,7 +353,11 @@ mod tests {
 
     #[test]
     fn signed_worktree_amend_is_finalized_immediately() -> gix_testtools::Result {
-        if !gix_testtools::signature::program_available("ssh-keygen") {
+        // `program_available` only proves the binary launches. Windows ships an OpenSSH in
+        // System32 that launches fine but cannot perform `-Y sign`, so it passes this check and
+        // then fails mid-test with empty output. `ssh_keygen()` prefers Git for Windows' bundled
+        // build and is the check the `gix` signing tests use.
+        if gix_testtools::signature::ssh_keygen().is_none() {
             return Ok(());
         }
         let (_key_home, key) = gix_testtools::signature::ssh_private_key()?;

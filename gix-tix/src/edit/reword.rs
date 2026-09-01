@@ -851,7 +851,9 @@ mod tests {
 
     #[test]
     fn signed_rewords_sign_eager_checked_out_descendants() -> gix_testtools::Result {
-        if !gix_testtools::signature::program_available("ssh-keygen") {
+        // See the note in `edit::head`: `program_available` cannot tell a signing-capable
+        // ssh-keygen from one that merely starts.
+        if gix_testtools::signature::ssh_keygen().is_none() {
             return Ok(());
         }
         let (_key_home, key) = gix_testtools::signature::ssh_private_key()?;
@@ -897,7 +899,9 @@ mod tests {
 
     #[test]
     fn rewrites_direct_refs_except_tags_and_remotes_and_signs_when_enabled() -> gix_testtools::Result {
-        if !gix_testtools::signature::program_available("ssh-keygen") {
+        // See the note in `edit::head`: `program_available` cannot tell a signing-capable
+        // ssh-keygen from one that merely starts.
+        if gix_testtools::signature::ssh_keygen().is_none() {
             return Ok(());
         }
         let (_key_home, key) = gix_testtools::signature::ssh_private_key()?;
