@@ -155,8 +155,7 @@ fn state_comparisons_with_various_extension_configurations() {
         Generated("v3_added_files"),
         Generated("v3_sparse_index_non_cone"),
         Generated("v3_sparse_index"),
-        // TODO: this fails because git writes the sdir extension in this case while gitoxide doesn't
-        // Generated("v2_sparse_index_no_dirs"),
+        Generated("v2_sparse_index_no_dirs"),
     ] {
         // Loose fixtures only exist as SHA-1 version.
         if gix_testtools::object_hash() != gix_hash::Kind::Sha1 && matches!(fixture, Loose(_)) {

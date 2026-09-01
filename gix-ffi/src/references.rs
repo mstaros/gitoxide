@@ -2,7 +2,7 @@ use interoptopus::ffi;
 
 use gix::bstr::ByteSlice;
 use gix::refs::{
-    Category, FullName, FullNameRef, Target, TargetRef,
+    FullName, Target, TargetRef,
     transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
 };
 
@@ -453,42 +453,6 @@ pub(crate) fn try_delete_reference(
     }
 }
 
-fn lock_location(repo: &gix::Repository, name: &FullNameRef) -> (std::path::PathBuf, std::path::PathBuf) {
-    let common = repo.common_dir();
-    let git = repo.git_dir();
-    let (base, relative) = match name.category_and_short_name() {
-        Some((Category::LinkedPseudoRef { .. }, _)) => (common, name.as_bstr()),
-        Some((
-            Category::Tag | Category::LocalBranch | Category::RemoteBranch | Category::Note,
-            _,
-        )) => (common, name.as_bstr()),
-        Some((Category::MainRef | Category::MainPseudoRef, shorthand)) => (common, shorthand),
-        Some((Category::LinkedRef { .. }, shorthand)) => {
-            if shorthand
-                .as_bstr()
-                .try_into()
-                .ok()
-                .and_then(|short: &FullNameRef| short.category())
-                .is_some_and(|category| category.is_worktree_private())
-            {
-                (common, name.as_bstr())
-            } else {
-                (common, shorthand)
-            }
-        }
-        Some((
-            Category::PseudoRef
-            | Category::Bisect
-            | Category::Rewritten
-            | Category::WorktreePrivate,
-            _,
-        )) => (git, name.as_bstr()),
-        None => (common, name.as_bstr()),
-    };
-    let relative = gix::path::to_native_path_on_windows(relative);
-    (base.join(relative.as_ref()), base.to_owned())
-}
-
 pub(crate) fn acquire_reference_locks(
     repo: &gix::Repository,
     encoded_names: &[u8],
@@ -510,8 +474,9 @@ pub(crate) fn acquire_reference_locks(
     let mut locations = std::vec::Vec::with_capacity(names.len());
     for raw_name in &names {
         let name = full_name(raw_name)?;
-        let (resource, boundary) = lock_location(repo, name.as_ref());
-        locations.push((resource, boundary));
+        let (base, relative) = repo.refs.reference_path_with_base(name.as_ref());
+        let resource = base.join(relative);
+        locations.push((resource, base.into_owned()));
     }
 
     let mut markers = std::vec::Vec::with_capacity(locations.len());

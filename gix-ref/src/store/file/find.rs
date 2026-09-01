@@ -257,7 +257,7 @@ impl file::Store {
     }
 
     /// Implements the logic required to transform a fully qualified refname into a filesystem path
-    pub(crate) fn reference_path_with_base<'b>(&self, name: &'b FullNameRef) -> (Cow<'_, Path>, Cow<'b, Path>) {
+    pub fn reference_path_with_base<'b>(&self, name: &'b FullNameRef) -> (Cow<'_, Path>, Cow<'b, Path>) {
         let (base, name) = self.to_base_dir_and_relative_name(name, false);
         (
             base,
@@ -271,7 +271,7 @@ impl file::Store {
     }
 
     /// Implements the logic required to transform a fully qualified refname into a filesystem path
-    pub(crate) fn reference_path(&self, name: &FullNameRef) -> PathBuf {
+    pub fn reference_path(&self, name: &FullNameRef) -> PathBuf {
         let (base, relative_path) = self.reference_path_with_base(name);
         base.join(relative_path)
     }

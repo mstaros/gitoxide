@@ -45,6 +45,45 @@ fn archive() -> crate::Result {
     Ok(())
 }
 
+/// Pins the fall-through in `gix_ref::file::Store::to_base_dir_and_relative_name`: a name whose
+/// category is unknown resolves against the *common* directory, so custom namespaces are shared
+/// by every worktree instead of being worktree-private. Tools that key coordination state on
+/// namespaces like `refs/guarded/*` depend on this, and a future `Category` variant could
+/// silently reroute it.
+#[test]
+fn custom_ref_namespace_created_in_linked_worktree_is_common() -> crate::Result {
+    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
+    let linked = gix::open_opts(fixture.path().join("wt-a"), crate::restricted())?;
+    assert_eq!(
+        linked.kind(),
+        gix::repository::Kind::LinkedWorkTree,
+        "precondition: the fixture hands us a linked worktree, not the main one"
+    );
+
+    let target = linked.head_id()?.detach();
+    linked.reference(
+        "refs/guarded/marker",
+        target,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "create custom-namespace marker",
+    )?;
+
+    assert!(
+        linked.common_dir().join("refs").join("guarded").join("marker").is_file(),
+        "uncategorised names are written to the common ref store"
+    );
+    assert!(
+        !linked.git_dir().join("refs").join("guarded").join("marker").exists(),
+        "and never into the worktree-private one"
+    );
+    assert_eq!(
+        linked.main_repo()?.find_reference("refs/guarded/marker")?.id().detach(),
+        target,
+        "so the main worktree resolves it too"
+    );
+    Ok(())
+}
+
 mod with_core_worktree_config {
     use std::io::BufRead;
 
