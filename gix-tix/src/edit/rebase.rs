@@ -4837,12 +4837,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a signing-capable ssh-keygen; see the note in `edit::head`"]
     fn a_squash_group_reports_one_configured_signature() -> gix_testtools::Result {
-        // See the note in `edit::head`: `program_available` cannot tell a signing-capable
-        // ssh-keygen from one that merely starts.
-        if gix_testtools::signature::ssh_keygen().is_none() {
-            return Ok(());
-        }
         let (_key_home, key) = gix_testtools::signature::ssh_private_key()?;
         let fixture = gix_testtools::scripted_fixture_writable("rebase_edit.sh")?;
         let repo = crate::test_repository::open_with(

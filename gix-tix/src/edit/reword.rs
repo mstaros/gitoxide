@@ -850,12 +850,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a signing-capable ssh-keygen; see the note in `edit::head`"]
     fn signed_rewords_sign_eager_checked_out_descendants() -> gix_testtools::Result {
-        // See the note in `edit::head`: `program_available` cannot tell a signing-capable
-        // ssh-keygen from one that merely starts.
-        if gix_testtools::signature::ssh_keygen().is_none() {
-            return Ok(());
-        }
         let (_key_home, key) = gix_testtools::signature::ssh_private_key()?;
         let fixture = gix_testtools::scripted_fixture_writable("rebase_edit.sh")?;
         let repository = crate::test_repository::open_with(
@@ -898,12 +894,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a signing-capable ssh-keygen; see the note in `edit::head`"]
     fn rewrites_direct_refs_except_tags_and_remotes_and_signs_when_enabled() -> gix_testtools::Result {
-        // See the note in `edit::head`: `program_available` cannot tell a signing-capable
-        // ssh-keygen from one that merely starts.
-        if gix_testtools::signature::ssh_keygen().is_none() {
-            return Ok(());
-        }
         let (_key_home, key) = gix_testtools::signature::ssh_private_key()?;
         let fixture = gix_testtools::scripted_fixture_writable("history.sh")?;
         let old_id = crate::test_repository::open(fixture.path())?.head_id()?.detach();
