@@ -74,14 +74,12 @@ pub(crate) fn update(
     let mut updates = Vec::new();
     let mut edit_indices_to_validate = Vec::new();
 
-    let mut checked_out_branches = repo.checked_out_branches().map_err(|err| match err {
-        crate::repository::worktree::CheckedOutBranchesError::WorktreeListing(err) => {
-            update::Error::WorktreeListing(err)
-        }
-        crate::repository::worktree::CheckedOutBranchesError::OpenWorktreeRepo(err) => {
-            update::Error::OpenWorktreeRepo(err)
-        }
-        crate::repository::worktree::CheckedOutBranchesError::FollowSymref(err) => update::Error::FollowSymref(err),
+    // `checked_out_branches` reports through `Exn`, which wraps the typed error in context
+    // frames; unwrap it so each cause keeps its own translation here.
+    let mut checked_out_branches = repo.checked_out_branches().map_err(|err| match err.into_inner() {
+        crate::repository::worktree_admin::Error::Listing(err) => update::Error::WorktreeListing(err),
+        crate::repository::worktree_admin::Error::OpenWorktreeRepo(err) => update::Error::OpenWorktreeRepo(err),
+        crate::repository::worktree_admin::Error::FollowSymref(err) => update::Error::FollowSymref(err),
     })?;
     let implicit_tag_refspec = fetch_tags
         .to_refspec()
