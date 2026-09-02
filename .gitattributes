@@ -4,6 +4,17 @@
 *.sh text eol=lf
 justfile text eol=lf
 
+# Fork edits introduced CRLF into sources upstream keeps at LF, which turns any
+# upstream change to those files into a whole-file conflict. Pin the extensions
+# the fork actually edits.
+#
+# Scoped rather than `* text=auto` on purpose: a blanket rule would also rewrite
+# `.gov/accounting.csv`, which is upstream's own file and CRLF there, so
+# normalising it would create divergence instead of removing it.
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+
 # have GitHub include fixture-making scripts when it counts code
 **/tests/fixtures/**/*.sh -linguist-vendored
 

@@ -179,6 +179,38 @@ One wrinkle Git does not have to think about and this does: a crashed `add_workt
 ### Related
 
 The same read-then-act shape is what `ReferenceLockLease` suffers from, filed separately. Whatever abandonment threshold that settles on should be the one used here.
+## CRLF normalisation: what was fixed, and what must not be
+
+Resolved for the files that mattered. Recorded because the obvious next step is wrong.
+
+### What was actually wrong
+
+`git ls-files --eol` found thirteen tracked files whose index line endings were CRLF while upstream `v0.58.0` keeps them at LF:
+
+- `gix-index/src/{lib,access/mod,file/init,file/mod}.rs`
+- `gix/src/config/tree/sections/{core,index}.rs`
+- `gix/src/repository/{index,mod,sparse_checkout/mod}.rs`
+- `gix/src/worktree/mod.rs`
+- `gix/tests/gix/repository/{mod,sparse_checkout}.rs`
+- `gix/Cargo.toml`
+
+Three of those - `gix/Cargo.toml`, `gix/src/repository/mod.rs`, `gix/tests/gix/repository/mod.rs` - were *mixed*, CRLF lines appended to an LF file, which only happens by editing.
+
+All sit in the sparse-index integration this fork added. Confirmed LF upstream with `git grep -c --perl-regexp "\r" v0.58.0 -- gix/src gix-index/src gix/tests gix/Cargo.toml`, which matched only `.tar` fixtures.
+
+### Do not normalise .gov/accounting.csv
+
+It is upstream's own sponsor-payment ledger, CRLF in upstream and CRLF here, and this fork has never touched it. Since the point of normalising is to *reduce* divergence from upstream, rewriting a file that upstream keeps as CRLF would manufacture the very conflict being removed.
+
+A blanket `* text=auto eol=lf` plus `git add --renormalize .` - the approach the original handoff proposed - would have rewritten it silently along with everything else. That is why `.gitattributes` now carries extension-scoped rules for `*.rs`, `*.toml` and `*.md` instead.
+
+### Fixtures were never at risk
+
+An earlier concern that renormalisation would corrupt deliberately-CRLF test data was unfounded, and `ls-files --eol` shows why: every such fixture already carries an explicit `-text` attribute, which overrides `text=auto`. That covers the `gix-transport` http response fixtures, all generated archives, and the fuzz corpora. The `attr/` column is the place to check before worrying.
+
+### If it recurs
+
+The `.gitattributes` rules stop new CRLF entering `.rs`, `.toml` or `.md`. Any other extension the fork starts editing needs its own line, or the same drift returns silently. `git ls-files --eol | findstr /V "i/lf"` is the whole diagnostic.
 # Binding expansion roadmap
 
 ## Completion contract
