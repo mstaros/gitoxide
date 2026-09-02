@@ -11,6 +11,7 @@ public enum GixErrorKind
     NotFound,
     InvalidReference,
     ReferenceConflict,
+    ReferenceLocked,
     Other,
 }
 

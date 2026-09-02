@@ -372,6 +372,8 @@ public sealed partial class GixRepository : IDisposable
                 (GixErrorKind.InvalidReference, error.AsInvalidReference().String),
             { IsReferenceConflict: true } =>
                 (GixErrorKind.ReferenceConflict, error.AsReferenceConflict().String),
+            { IsReferenceLocked: true } =>
+                (GixErrorKind.ReferenceLocked, error.AsReferenceLocked().String),
             { IsOther: true } =>
                 (GixErrorKind.Other, error.AsOther().String),
             _ =>

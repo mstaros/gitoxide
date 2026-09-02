@@ -155,7 +155,7 @@ public sealed partial class GixRepository
     /// Atomically replaces an exact direct reference when its current object ID
     /// equals <paramref name="expected"/>.
     /// </summary>
-    public bool CompareExchangeReference(
+    public ReferenceUpdateOutcome CompareExchangeReference(
         string name,
         GixObjectId target,
         GixObjectId expected)
@@ -178,15 +178,15 @@ public sealed partial class GixRepository
     /// Deletes an exact direct reference when its current object ID equals
     /// <paramref name="expected"/>.
     /// </summary>
-    public bool TryDeleteReference(string name, GixObjectId expected)
+    public ReferenceUpdateOutcome DeleteReference(string name, GixObjectId expected)
     {
         var nameBytes = EncodeRequiredReferenceText(name, nameof(name));
 
-        return Invoke("TryDeleteReference", repo =>
+        return Invoke("DeleteReference", repo =>
         {
             using var nativeName = nameBytes.Slice();
             using var nativeExpected = expected.Value.Utf8();
-            return repo.TryDeleteReference(nativeName, nativeExpected);
+            return repo.DeleteReference(nativeName, nativeExpected);
         });
     }
 

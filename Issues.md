@@ -60,6 +60,96 @@ The Rust generation chain, Roslyn build, and 15 TUnit tests pass against the rea
 
 This closes only the managed-layer proof of concept. The exposed Rust facade is still six methods and is not a usable binding.
 
+## Two integrated commits were validated without gix-ffi being compiled
+
+Severity: medium, historical. The planning gap that caused this has since been addressed in `rust-mcp-transform`; what remains is the unreliable evidence those two commits left behind.
+
+### What happened
+
+`gix-ffi/Cargo.toml` declares its own empty `[workspace]`, deliberately: joining the gitoxide workspace would unify `gix` feature selection with `gitoxide-core` and the `gix` CLI, which carry a `compile_error!` when `blocking-network-client` and `async-network-client` are both active. That separation is necessary and should stay.
+
+At the time, validation planning ran a single `cargo metadata` at the repository root. A package that declares its own workspace does not appear in that answer, so `gix-ffi` was never enumerated and no step could compile it. An integrated commit logged `metadata_package_count: 12`, `selected_package_count: 11`, with the packages listed by name.
+
+Worse, both integrated transactions that changed `gix-ffi` reported `uncovered: 0`:
+
+- `34ce63c0` to candidate `360a8d75`: 20 files changed, `passed: 2`, `uncovered: 0`
+- `5dd532a4` to candidate `0f2a4f04`: 2 files changed, `passed: 2`, `uncovered: 0`
+
+The counter was working - an earlier failed attempt in the first of those transactions reported `uncovered: 11` across 15 files. It reported none for these. So the changes were not merely unchecked; they were counted as covered.
+
+### Since superseded
+
+`rust-mcp-transform` now has multi-root discovery aimed squarely at this case. `discover_cargo_roots` walks the repository for manifests and runs one `cargo metadata` per workspace, skipping members an earlier probe already claimed. `CargoUnionGraph` spans every discovered workspace with reverse dependencies resolved across workspace boundaries, and its `owner_for_path` documents the intent directly: the innermost package root wins, which is how a crate excluded from an enclosing workspace still resolves to itself. That is `gix-ffi`.
+
+### What is still owed
+
+- Confirm empirically that a gitoxide commit now plans steps for `gix-ffi`, by reading the plan in a commit operation log rather than assuming it. Until that is seen, do not rely on gate evidence for this crate.
+- Treat the two commits above as unvalidated for `gix-ffi` regardless of what their evidence says.
+- `plan_workspace_selections` skips changes that no package owns. That is correct for `Issues.md`, `Interop.cs` and other non-Cargo inputs, and the code says the claiming decision belongs to the provider. Confirm what the provider does with them, because an unowned path silently counting as covered is the same shape as the failure above.
+
+### Working practice meanwhile
+
+`gix-ffi` is its own workspace root, so validate from inside it and build the C# tests separately:
+
+```
+cd gix-ffi && cargo clippy --workspace --all-targets && cargo nextest run --workspace
+dotnet build gix-ffi/bindings/GixSharp.Tests/GixSharp.Tests.csproj
+```
+## GixError to GixErrorKind mapping is not exhaustive, so new variants degrade to Other
+
+Severity: medium. `GixRepository.cs` maps `GixError` to `GixErrorKind` with property patterns and a catch-all:
+
+```csharp
+{ IsReferenceConflict: true } =>
+    (GixErrorKind.ReferenceConflict, error.AsReferenceConflict().String),
+{ IsOther: true } =>
+    (GixErrorKind.Other, error.AsOther().String),
+_ =>
+    (GixErrorKind.Other, error.ToString()),
+```
+
+That shape can never be exhaustive. Adding a Rust variant compiles cleanly on the C# side and degrades silently to `Other`.
+
+It happened. Adding `GixError::ReferenceLocked` left `GixErrorKind` at nine members against ten generated variants, with no compile error and no warning. Nothing reported the drift. It surfaced only because one test asserted a specific `Kind` rather than merely that an error occurred, and the assertion then failed for a reason unrelated to what the test was about.
+
+### Why this one is fixable now
+
+`GixError` is union-projected. `Interop.cs` already emits real case types - `ReferenceConflictCase`, `ReferenceLockedCase`, `OtherCase` - each a `readonly record struct`, with `TryGetValue` overloads per case.
+
+Switching on those case types instead of `Is*` properties makes exhaustiveness a compiler question. A new Rust variant then breaks the build at the mapper, which is the correct moment to notice.
+
+This does not need the analyzer filed separately for plain enums, and it does not need closed enums. The union support is already there and already generated.
+
+### Scope
+
+The same catch-all shape should be looked for anywhere else the managed layer consumes a generated union. This entry covers the error mapper only because that is where it was found.
+
+### Related
+
+The general problem - a hand-written managed layer that does not track generated changes and has nothing enforcing it - is already filed under "Hand-written GixSharp managed layer over the generated interop". This is the first concrete instance with a demonstrated cost.
+## C# enum switches are not exhaustive, so outcome enums need an analyzer until closed enums land
+
+Severity: medium. `ReferenceUpdateOutcome` is payload-free, so interoptopus projects it as a plain C# `enum` - `public enum ReferenceUpdateOutcome : byte`, crossing as `ManagedConversion::AsIs` with no marshaller. That is the cheapest possible wire shape and the right one.
+
+The cost is that a C# `enum` switch is not exhaustive. Any integer can be cast to an enum value, so the compiler cannot require a caller to handle `Absent`. The distinction the outcome exists to express can be dropped again at the call site with no diagnostic.
+
+This is not the same problem as the error mapper. That one switches on a union with real case types and can be made a compile error today. This one cannot, because the wire type is deliberately a plain enum.
+
+### Deliverable
+
+An analyzer that requires exhaustive handling of the outcome enums, reported as an error rather than a warning.
+
+It needs a rule for which enums it polices - an attribute, a naming convention, or an explicit list. Applying it to every C# enum in the binding would be wrong; applying it only to types projected from payload-free Rust enums is the intent.
+
+### Lifetime
+
+This is deliberately temporary. Closed enums are expected in C# within months and make the check native. The analyzer should be written so it can be deleted rather than migrated: no configuration surface, no suppressions file, one rule.
+
+### Why the alternative was rejected
+
+Wrapping the enum in a hand-written C# union in the managed facade would give exhaustiveness immediately, since union switches are exhaustive without a fallback. It was rejected because the union layer is work that closed enums make redundant, and because union declarations box - they lower to a struct holding `object? Value`, so every returned outcome allocates.
+
+If the analyzer turns out to be more work than the union wrapper, that trade is worth revisiting. It was decided on the assumption that the analyzer is small.
 # Binding expansion roadmap
 
 ## Completion contract
@@ -580,7 +670,7 @@ Note a root `.gitattributes` already exists; check what it covers before adding 
 ### Caveat
 
 Renormalisation rewrites many files in one commit, so it should be its own change with nothing else in it, landed when no other work is in flight.
-## No guarded symbolic-ref write: compare_exchange_reference is object-only and set_head is unconditional
+## gix-ffi exposes no guarded symbolic-ref write, although gix-ref supports one
 
 ```issue
 id: b660e063
@@ -589,23 +679,34 @@ severity: medium
 status: open
 ```
 
-Two gaps found while surveying the ref layer for worktree administration. Neither is a defect in what exists; both are missing capability that `worktree add` will need.
+The original entry suspected that the limit was in the FFI surface rather than the store, and asked for that to be confirmed. It has been. The store supports guarded symbolic writes, so this is an exposure task in `gix-ffi`, not a change to `gix-ref`.
 
-### No compare-and-swap for symbolic references
+### Confirmed: gix-ref already guards symbolic targets
 
-`gix-ffi`'s `compare_exchange_reference` builds `PreviousValue::MustExistAndMatch(Target::Object(expected))`, so it can only guard an object target. There is no way to say "point `HEAD` at `refs/heads/x`, but only if it currently points at `refs/heads/y`".
+`PreviousValue::MustExistAndMatch` and `ExistingMustMatch` both take a `Target`, and `Target` is `Object(ObjectId) | Symbolic(FullName)`. The transaction layer in `gix-ref/src/store/file/transaction/prepare.rs` destructures the expectation and compares it against the existing target without caring which variant it holds, so symbolic expectations work by construction rather than by special case.
 
-`gix-ref` itself models symbolic targets in `PreviousValue`, so the limit is in the FFI surface rather than the underlying store — worth confirming before designing around it.
+It is exercised in both directions:
 
-### `set_head` is unconditional
+- `gix-ref/tests/refs/file/transaction/prepare_and_commit/delete.rs` guards deletes with `MustExistAndMatch(Target::Symbolic("refs/heads/main"))`
+- `gix/src/remote/connection/fetch/update_refs/mod.rs` matches on `MustExistAndMatch(Target::Symbolic(_))` in production fetch code
 
-`gix-ffi`'s `set_head` writes with `PreviousValue::Any`, so it always wins. That is correct for `git symbolic-ref HEAD <ref>` semantics, but it means a caller cannot detach or re-attach a worktree's `HEAD` safely against concurrent modification.
+So nothing needs adding to `gix-ref`, and the acceptance bar for this work is `gix-ref`'s own transaction tests rather than a differential against `git`. Note that `git symbolic-ref` has no expected-value argument, so there is no porcelain equivalent to compare against; `git update-ref --stdin` gained `symref-verify` and `symref-update` in recent versions and is the closest git-shaped signature if the installed git is new enough.
 
-### Why it matters here
+### The actual gap, in gix-ffi
 
-`git worktree add` writes a `HEAD` into the new administrative directory, and the resumable-materialisation path re-attaches an existing worktree's `HEAD` to a specific branch at a specific tip. Both want a guarded symbolic-ref write: unconditional writes make "finish what was interrupted" indistinguishable from "clobber what someone else did".
+`compare_exchange_reference` takes `expected` and `target` as hex `ffi::String` values and builds `Target::Object` from both. Its signature cannot express a symbolic expectation, so this is a new entry point rather than a change to the existing one. libgit2 solved the same problem the same way, with `git_reference_symbolic_create_matching` alongside `git_reference_create_matching`.
 
-Not blocking the read model, but decide before implementing `add`.
+`set_head` writes `Target::Symbolic(target)` with `PreviousValue::Any`. That is correct for `git symbolic-ref HEAD <ref>` semantics; what is missing is a guarded variant beside it.
+
+### Correction to the earlier framing
+
+The original entry cited `git worktree add` writing a `HEAD` into the new administrative directory as a motivating case. That is not one. `add_worktree` writes `HEAD` with `std::fs::write` into a directory it created moments earlier, so there is no prior value to clobber and no race of that shape. The real hazard in `add_worktree` is that identifier derivation is not atomic, which is a separate concern.
+
+### Why it still matters
+
+Resumable materialisation re-attaches an existing worktree's `HEAD` to a specific branch at a specific tip. There, an unconditional write does make "finish what was interrupted" indistinguishable from "clobber what someone else did", and that is the case this issue exists for.
+
+`repair` does not need it: `repair_worktrees` writes only `gitdir` and `.git` pointer files and touches no refs.
 ## ReferenceLockLease has no stale-lock recovery: a crashed holder wedges its transaction forever
 
 ```issue

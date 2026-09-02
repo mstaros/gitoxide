@@ -31,7 +31,9 @@ mod references;
 mod status;
 pub use byte_stream::ByteReader;
 pub use index::IndexEntryRecord;
-pub use references::{BranchRecord, OptionalObjectId, ReferenceLockLease, ReferenceRecord};
+pub use references::{
+    BranchRecord, OptionalObjectId, ReferenceLockLease, ReferenceRecord, ReferenceUpdateOutcome,
+};
 pub use status::StatusRecord;
 
 /// The single error type crossing the boundary.
@@ -65,8 +67,16 @@ pub enum GixError {
     NotFound(ffi::String),
     /// A reference name is not valid for the requested operation.
     InvalidReference(ffi::String),
-    /// A reference edit or lock lost a race with another writer.
+    /// A reference edit lost a race with another writer.
     ReferenceConflict(ffi::String),
+    /// A reference lock file could not be acquired.
+    ///
+    /// Distinct from [`GixError::ReferenceConflict`], which means an edit lost
+    /// a race with a live writer. This can also mean a `.lock` was left behind
+    /// by a process that died: `gix::lock::Marker` releases on `Drop` but not
+    /// on crash, so there may be no other writer at all and no amount of
+    /// retrying will clear it. See `Issues.md` `b66f8f9c`.
+    ReferenceLocked(ffi::String),
     /// Anything not yet categorised.
     Other(ffi::String),
 }
@@ -1190,7 +1200,7 @@ impl Repo {
         name: ffi::Slice<u8>,
         target: ffi::String,
         expected: ffi::String,
-    ) -> ffi::Result<bool, GixError> {
+    ) -> ffi::Result<ReferenceUpdateOutcome, GixError> {
         let repo = self.inner.to_thread_local();
         match references::compare_exchange_reference(
             &repo,
@@ -1198,20 +1208,20 @@ impl Repo {
             &target,
             &expected,
         ) {
-            Ok(updated) => ffi::Ok(updated),
+            Ok(outcome) => ffi::Ok(outcome),
             Err(error) => ffi::Err(error),
         }
     }
 
     /// Delete an exact direct reference when expected-old matches.
-    pub fn try_delete_reference(
+    pub fn delete_reference(
         &self,
         name: ffi::Slice<u8>,
         expected: ffi::String,
-    ) -> ffi::Result<bool, GixError> {
+    ) -> ffi::Result<ReferenceUpdateOutcome, GixError> {
         let repo = self.inner.to_thread_local();
-        match references::try_delete_reference(&repo, name.as_slice(), &expected) {
-            Ok(deleted) => ffi::Ok(deleted),
+        match references::delete_reference(&repo, name.as_slice(), &expected) {
+            Ok(outcome) => ffi::Ok(outcome),
             Err(error) => ffi::Err(error),
         }
     }

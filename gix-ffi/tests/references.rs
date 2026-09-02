@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gix_ffi::{
-    BranchRecord, GixError, ReferenceLockLease, ReferenceRecord, Repo,
+    BranchRecord, GixError, ReferenceLockLease, ReferenceRecord, ReferenceUpdateOutcome, Repo,
 };
 use interoptopus::ffi;
 
@@ -53,6 +53,7 @@ fn ok<T>(result: ffi::Result<T, GixError>) -> T {
                 | GixError::NotFound(value)
                 | GixError::InvalidReference(value)
                 | GixError::ReferenceConflict(value)
+                | GixError::ReferenceLocked(value)
                 | GixError::Other(value) => value,
             };
             panic!("unexpected FFI error: {}", message.as_str());
@@ -339,11 +340,15 @@ fn exact_reference_operations_preserve_expected_old_semantics_and_empty_reflog_m
     assert!(found.found);
     assert_eq!(found.id.as_str(), first);
 
-    assert!(!ok(repo.compare_exchange_reference(
-        ffi::Slice::from_slice(name),
-        string(&second),
-        string(&second),
-    )));
+    assert_eq!(
+        ok(repo.compare_exchange_reference(
+            ffi::Slice::from_slice(name),
+            string(&second),
+            string(&second),
+        )),
+        ReferenceUpdateOutcome::Mismatch,
+        "the reference exists but holds `first`, so the swap is refused"
+    );
     assert_eq!(
         ok(repo.try_get_reference_target(ffi::Slice::from_slice(name)))
             .id
@@ -351,11 +356,14 @@ fn exact_reference_operations_preserve_expected_old_semantics_and_empty_reflog_m
         first
     );
 
-    assert!(ok(repo.compare_exchange_reference(
-        ffi::Slice::from_slice(name),
-        string(&second),
-        string(&first),
-    )));
+    assert_eq!(
+        ok(repo.compare_exchange_reference(
+            ffi::Slice::from_slice(name),
+            string(&second),
+            string(&first),
+        )),
+        ReferenceUpdateOutcome::Applied
+    );
     assert_eq!(
         ok(repo.try_get_reference_target(ffi::Slice::from_slice(name)))
             .id
@@ -375,14 +383,42 @@ fn exact_reference_operations_preserve_expected_old_semantics_and_empty_reflog_m
         "null compatibility messages map to gix's message-free reflog form"
     );
 
-    assert!(!ok(repo.try_delete_reference(
-        ffi::Slice::from_slice(name),
-        string(&first),
-    )));
-    assert!(ok(repo.try_delete_reference(
-        ffi::Slice::from_slice(name),
-        string(&second),
-    )));
+    assert_eq!(
+        ok(repo.delete_reference(
+            ffi::Slice::from_slice(name),
+            string(&first),
+        )),
+        ReferenceUpdateOutcome::Mismatch,
+        "the reference holds `second`, so it is left alone rather than deleted"
+    );
+    assert_eq!(
+        ok(repo.delete_reference(
+            ffi::Slice::from_slice(name),
+            string(&second),
+        )),
+        ReferenceUpdateOutcome::Applied
+    );
+
+    // The distinction the previous `bool` return could not express: both of
+    // these used to answer `false`, identically to the two refusals above.
+    assert_eq!(
+        ok(repo.delete_reference(
+            ffi::Slice::from_slice(name),
+            string(&second),
+        )),
+        ReferenceUpdateOutcome::Absent,
+        "deleting an already-deleted reference is not the same as refusing to \
+         delete one that moved"
+    );
+    assert_eq!(
+        ok(repo.compare_exchange_reference(
+            ffi::Slice::from_slice(name),
+            string(&first),
+            string(&second),
+        )),
+        ReferenceUpdateOutcome::Absent,
+        "swapping an absent reference is not the same as a mismatch"
+    );
     assert!(
         !ok(repo.try_get_reference_target(ffi::Slice::from_slice(name))).found
     );
@@ -412,7 +448,7 @@ fn multi_reference_locks_are_ordered_atomic_and_release_on_drop() {
             ffi::Slice::from_slice(b"refs/heads/one"),
             string(&first),
         ),
-        ffi::Err(GixError::ReferenceConflict(_))
+        ffi::Err(GixError::ReferenceLocked(_))
     ));
 
     drop(lease);
@@ -430,7 +466,7 @@ fn multi_reference_locks_are_ordered_atomic_and_release_on_drop() {
             ffi::Slice::from_slice(&repository_path),
             ffi::Slice::from_slice(b"refs/heads/z\0refs/heads/a"),
         ),
-        ffi::Err(GixError::ReferenceConflict(_))
+        ffi::Err(GixError::ReferenceLocked(_))
     ));
     assert!(
         !root.0.join(".git/refs/heads/a.lock").exists(),

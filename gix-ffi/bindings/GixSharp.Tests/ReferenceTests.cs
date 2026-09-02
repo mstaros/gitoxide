@@ -212,7 +212,7 @@ public sealed class ReferenceTests
                 name,
                 fixture.Second,
                 fixture.Second))
-            .IsFalse();
+            .IsEqualTo(ReferenceUpdateOutcome.Mismatch);
         await Assert.That(repository.TryGetReferenceTarget(name, out var unchanged))
             .IsTrue();
         await Assert.That(unchanged).IsEqualTo(fixture.First);
@@ -221,7 +221,7 @@ public sealed class ReferenceTests
                 name,
                 fixture.Second,
                 fixture.First))
-            .IsTrue();
+            .IsEqualTo(ReferenceUpdateOutcome.Applied);
         await Assert.That(repository.TryGetReferenceTarget(name, out var second))
             .IsTrue();
         await Assert.That(second).IsEqualTo(fixture.Second);
@@ -253,18 +253,27 @@ public sealed class ReferenceTests
         await Assert.That(reflog.All(static line => !line.Contains('\t')))
             .IsTrue();
 
-        await Assert.That(repository.TryDeleteReference(
+        await Assert.That(repository.DeleteReference(
                 name,
                 fixture.First))
-            .IsFalse();
-        await Assert.That(repository.TryDeleteReference(
+            .IsEqualTo(ReferenceUpdateOutcome.Mismatch);
+        await Assert.That(repository.DeleteReference(
                 name,
                 fixture.Second))
-            .IsTrue();
-        await Assert.That(repository.TryDeleteReference(
+            .IsEqualTo(ReferenceUpdateOutcome.Applied);
+
+        // These two used to answer false, identically to the refusal above: one
+        // because the reference had moved and was left alone, the other because
+        // it was already gone. A caller could not tell them apart.
+        await Assert.That(repository.DeleteReference(
                 name,
                 fixture.Second))
-            .IsFalse();
+            .IsEqualTo(ReferenceUpdateOutcome.Absent);
+        await Assert.That(repository.CompareExchangeReference(
+                name,
+                fixture.First,
+                fixture.Second))
+            .IsEqualTo(ReferenceUpdateOutcome.Absent);
         await Assert.That(repository.TryGetReferenceTarget(name, out _))
             .IsFalse();
 
@@ -304,7 +313,7 @@ public sealed class ReferenceTests
                 "refs/heads/one",
                 fixture.First));
         await Assert.That(contention.Kind)
-            .IsEqualTo(GixErrorKind.ReferenceConflict);
+            .IsEqualTo(GixErrorKind.ReferenceLocked);
 
         lease.Dispose();
         lease.Dispose();
@@ -325,8 +334,12 @@ public sealed class ReferenceTests
             () => repository.AcquireReferenceLocks(
                 "refs/heads/z",
                 "refs/heads/a"));
+        // The lock here was written by this test, not held by a live process.
+        // ReferenceConflict claims an edit lost a race with another writer,
+        // which is untrue of an abandoned lock file; ReferenceLocked does not
+        // claim to know which it is.
         await Assert.That(partial.Kind)
-            .IsEqualTo(GixErrorKind.ReferenceConflict);
+            .IsEqualTo(GixErrorKind.ReferenceLocked);
         await Assert.That(File.Exists(Path.Combine(
                 repository.RepositoryPath,
                 "refs",

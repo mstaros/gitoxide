@@ -15,6 +15,32 @@ const LOCAL_BRANCHES: u32 = 1;
 const REMOTE_BRANCHES: u32 = 2;
 const ALL_BRANCHES: u32 = LOCAL_BRANCHES | REMOTE_BRANCHES;
 
+/// The result of a guarded reference update.
+///
+/// Replaces a `bool` that collapsed two different refusals into one value.
+/// `Mismatch` and `Absent` both mean nothing was changed, but they call for
+/// different recovery: a mismatch means another writer moved the reference and
+/// the caller must re-read before retrying, while an absent reference means
+/// there is nothing left to act on at all.
+///
+/// Payload-free on purpose. Interoptopus projects a unit-only enum as a plain
+/// C# `enum` only when its discriminant is a type C# accepts as an enum base;
+/// it then crosses as `ManagedConversion::AsIs` with no unmanaged mirror and no
+/// marshaller. Declaring a `repr` here would be inert: `#[ffi]` strips whatever
+/// the source wrote and substitutes its own optimal discriminant, and the C# base
+/// type is derived from that same choice, so the two sides cannot disagree.
+#[ffi]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceUpdateOutcome {
+    /// The reference matched the expected value and the change was made.
+    Applied,
+    /// The reference exists but did not match the expected value. Nothing was
+    /// changed.
+    Mismatch,
+    /// The reference does not exist. Nothing was changed.
+    Absent,
+}
+
 #[ffi]
 #[derive(Debug, Clone)]
 pub struct ReferenceRecord {
@@ -83,6 +109,10 @@ fn invalid_reference(value: impl Into<String>) -> GixError {
 
 fn reference_conflict(value: impl Into<String>) -> GixError {
     GixError::ReferenceConflict(message(value))
+}
+
+fn reference_locked(value: impl Into<String>) -> GixError {
+    GixError::ReferenceLocked(message(value))
 }
 
 fn full_name(value: &[u8]) -> Result<FullName, GixError> {
@@ -173,13 +203,35 @@ fn edit_precondition_failed(error: &gix::reference::edit::Error) -> bool {
     )
 }
 
+/// Classify a failed edit as a refusal the caller can act on, or `None` when it
+/// is a real error.
+///
+/// The two refusals arrive here as already-distinct variants.
+/// [`edit_precondition_failed`] answers `bool` and is still correct for callers
+/// guarding with `MustNotExist`, where the single refusal is unambiguous; this
+/// exists for `MustExistAndMatch`, where it is not.
+fn refusal_outcome(error: &gix::reference::edit::Error) -> Option<ReferenceUpdateOutcome> {
+    use gix::refs::file::transaction::prepare::Error as Prepare;
+    match error {
+        gix::reference::edit::Error::FileTransactionPrepare(Prepare::ReferenceOutOfDate { .. }) => {
+            Some(ReferenceUpdateOutcome::Mismatch)
+        }
+        gix::reference::edit::Error::FileTransactionPrepare(
+            Prepare::MustExist { .. } | Prepare::DeleteReferenceMustExist { .. },
+        ) => Some(ReferenceUpdateOutcome::Absent),
+        _ => None,
+    }
+}
+
 fn map_edit_error(error: gix::reference::edit::Error) -> GixError {
     let detail = chain_to_string(&error);
     match &error {
         gix::reference::edit::Error::NameValidation(_) => GixError::InvalidReference(detail),
         gix::reference::edit::Error::FileTransactionPrepare(inner) => match inner {
-            gix::refs::file::transaction::prepare::Error::LockAcquire { .. }
-            | gix::refs::file::transaction::prepare::Error::PackedTransactionAcquire(_) => {
+            gix::refs::file::transaction::prepare::Error::LockAcquire { .. } => {
+                GixError::ReferenceLocked(detail)
+            }
+            gix::refs::file::transaction::prepare::Error::PackedTransactionAcquire(_) => {
                 GixError::ReferenceConflict(detail)
             }
             gix::refs::file::transaction::prepare::Error::Io(_) => GixError::Io(detail),
@@ -421,7 +473,7 @@ pub(crate) fn compare_exchange_reference(
     name: &[u8],
     target: &ffi::String,
     expected: &ffi::String,
-) -> Result<bool, GixError> {
+) -> Result<ReferenceUpdateOutcome, GixError> {
     let name = full_name(name)?;
     let target = parse_id_for_repo(repo, target)?;
     let expected = parse_id_for_repo(repo, expected)?;
@@ -430,26 +482,30 @@ pub(crate) fn compare_exchange_reference(
         Target::Object(target),
         PreviousValue::MustExistAndMatch(Target::Object(expected)),
     )) {
-        Ok(_) => Ok(true),
-        Err(error) if edit_precondition_failed(&error) => Ok(false),
-        Err(error) => Err(map_edit_error(error)),
+        Ok(_) => Ok(ReferenceUpdateOutcome::Applied),
+        Err(error) => match refusal_outcome(&error) {
+            Some(outcome) => Ok(outcome),
+            None => Err(map_edit_error(error)),
+        },
     }
 }
 
-pub(crate) fn try_delete_reference(
+pub(crate) fn delete_reference(
     repo: &gix::Repository,
     name: &[u8],
     expected: &ffi::String,
-) -> Result<bool, GixError> {
+) -> Result<ReferenceUpdateOutcome, GixError> {
     let name = full_name(name)?;
     let expected = parse_id_for_repo(repo, expected)?;
     match repo.edit_reference(delete_edit(
         name,
         PreviousValue::MustExistAndMatch(Target::Object(expected)),
     )) {
-        Ok(_) => Ok(true),
-        Err(error) if edit_precondition_failed(&error) => Ok(false),
-        Err(error) => Err(map_edit_error(error)),
+        Ok(_) => Ok(ReferenceUpdateOutcome::Applied),
+        Err(error) => match refusal_outcome(&error) {
+            Some(outcome) => Ok(outcome),
+            None => Err(map_edit_error(error)),
+        },
     }
 }
 
@@ -488,7 +544,7 @@ pub(crate) fn acquire_reference_locks(
         ) {
             Ok(marker) => markers.push(marker),
             Err(gix::lock::acquire::Error::PermanentlyLocked { .. }) => {
-                return Err(reference_conflict(
+                return Err(reference_locked(
                     "one or more requested references are already locked",
                 ));
             }

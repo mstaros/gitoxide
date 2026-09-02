@@ -47,6 +47,7 @@ fn ok<T>(result: ffi::Result<T, GixError>) -> T {
                 | GixError::NotFound(value)
                 | GixError::InvalidReference(value)
                 | GixError::ReferenceConflict(value)
+                | GixError::ReferenceLocked(value)
                 | GixError::Other(value) => value,
             };
             panic!("unexpected FFI error: {}", message.as_str());
