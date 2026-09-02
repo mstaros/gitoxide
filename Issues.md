@@ -150,6 +150,35 @@ This is deliberately temporary. Closed enums are expected in C# within months an
 Wrapping the enum in a hand-written C# union in the managed facade would give exhaustiveness immediately, since union switches are exhaustive without a fallback. It was rejected because the union layer is work that closed enums make redundant, and because union declarations box - they lower to a struct holding `object? Value`, so every returned outcome allocates.
 
 If the analyzer turns out to be more work than the union wrapper, that trade is worth revisiting. It was decided on the assumption that the analyzer is small.
+## add_worktree derives its identifier non-atomically; git uses mkdir/EEXIST
+
+Severity: medium, open. `add_worktree` derives the administrative identifier from the checkout's final component and disambiguates against the entries it read a moment earlier (`unused_worktree_id`). Reading and then creating is not atomic, so two concurrent calls can derive the same unused identifier and both proceed.
+
+### Git already solves this, and the fix is the same shape
+
+`builtin/worktree.c:507-514`:
+
+```c
+while (mkdir(sb_repo.buf, 0777)) {
+    counter++;
+    if ((errno != EEXIST) || !counter /* overflow */)
+        die_errno(_("could not create directory of '%s'"), sb_repo.buf);
+    strbuf_setlen(&sb_repo, len);
+    strbuf_addf(&sb_repo, "%d", counter);
+}
+```
+
+The filesystem decides. `mkdir` either creates the directory or reports `EEXIST`, and on `EEXIST` the loser appends a counter and retries. There is no window between checking and creating because there is no check.
+
+### What this needs here
+
+`create_dir` rather than `create_dir_all` for the administrative directory, so an existing directory is an error rather than a silent success, and a retry loop around identifier derivation.
+
+One wrinkle Git does not have to think about and this does: a crashed `add_worktree` leaves a registration directory that nothing owns, and under `create_dir` semantics that identifier is then permanently lost to the counter. The machinery to handle it already exists - `worktree_admin_entries()` classifies such a directory as `MissingGitdir`, and `prune_worktrees()` already removes those subject to an expiry. So on collision, consult the entries: if the winner is `MissingGitdir` and older than the caller's threshold, prune it and retry once. That reuses the existing staleness policy rather than inventing a second one.
+
+### Related
+
+The same read-then-act shape is what `ReferenceLockLease` suffers from, filed separately. Whatever abandonment threshold that settles on should be the one used here.
 # Binding expansion roadmap
 
 ## Completion contract
@@ -700,7 +729,11 @@ So nothing needs adding to `gix-ref`, and the acceptance bar for this work is `g
 
 ### Correction to the earlier framing
 
-The original entry cited `git worktree add` writing a `HEAD` into the new administrative directory as a motivating case. That is not one. `add_worktree` writes `HEAD` with `std::fs::write` into a directory it created moments earlier, so there is no prior value to clobber and no race of that shape. The real hazard in `add_worktree` is that identifier derivation is not atomic, which is a separate concern.
+The original entry cited `git worktree add` writing a `HEAD` into the new administrative directory as a motivating case. That is not one. `add_worktree` wrote `HEAD` into a directory it had created moments earlier, so there was no prior value to clobber and no race of that shape.
+
+`add_worktree` no longer writes `HEAD` unguarded in any case. It now goes through a reference transaction on a store scoped to the new administrative directory: `MustNotExist` when detaching, and `ExistingMustMatch(Object(tip))` when attaching to a branch, the latter because that is the only form for which `gix-ref` emits a reflog on a symbolic update. So the `set_head` gap below is the remaining one, and it is entirely in `gix-ffi`.
+
+The real hazard left in `add_worktree` is that identifier derivation is not atomic. Git avoids it by looping on `mkdir` until it no longer reports `EEXIST`, appending a counter (`builtin/worktree.c:507-514`), which is the same `create_new` shape proposed for the fix here.
 
 ### Why it still matters
 

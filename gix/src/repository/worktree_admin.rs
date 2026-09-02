@@ -247,6 +247,11 @@ pub mod add {
         },
         #[error("Could not determine which branches are already in use")]
         Reservation(#[source] super::Error),
+        #[error("Could not write the new worktree's HEAD")]
+        WriteHead {
+            #[source]
+            source: Box<dyn std::error::Error + Send + Sync + 'static>,
+        },
         #[error("Could not create or write {path:?}")]
         Io {
             path: PathBuf,
@@ -534,9 +539,9 @@ impl crate::Repository {
     ///
     /// ### Note
     ///
-    /// `HEAD` is written unconditionally, as no guarded symbolic-reference update exists yet. Two
-    /// concurrent calls racing for the same identifier can therefore both proceed; the identifier
-    /// is derived to avoid collisions, but that derivation is not itself atomic.
+    /// Two concurrent calls racing for the same identifier can both proceed: the identifier is
+    /// derived to avoid collisions, but that derivation is not itself atomic. Git avoids this by
+    /// looping on `mkdir` until it no longer reports `EEXIST`.
     pub fn add_worktree(
         &self,
         path: &std::path::Path,
@@ -963,7 +968,7 @@ impl crate::Repository {
         attach: &add::Attachment,
         lock: Option<&Option<BString>>,
     ) -> Result<(), Exn<add::Error>> {
-        use add::{Attachment, Error};
+        use add::Error;
         let io = |path: &std::path::Path| {
             let path = path.to_owned();
             move |source: std::io::Error| Error::Io { path, source }.raise()
@@ -978,20 +983,7 @@ impl crate::Repository {
         // `commondir` is relative to the administrative directory, which is always two levels down.
         std::fs::write(admin_dir.join("commondir"), b"../..\n").map_err(io(&admin_dir.join("commondir")))?;
 
-        let head = match attach {
-            Attachment::Branch(name) => {
-                let mut head = BString::from("ref: ");
-                head.extend_from_slice(name.as_bstr());
-                head.push(b'\n');
-                head
-            }
-            Attachment::DetachedAt(id) => {
-                let mut head = BString::from(id.to_string());
-                head.push(b'\n');
-                head
-            }
-        };
-        std::fs::write(admin_dir.join("HEAD"), &head).map_err(io(&admin_dir.join("HEAD")))?;
+        self.write_worktree_head(admin_dir, attach)?;
 
         if let Some(reason) = lock {
             let mut contents = reason.clone().unwrap_or_default();
@@ -1003,6 +995,90 @@ impl crate::Repository {
 
         // The checkout points back at us, completing the two-way link.
         write_dot_git_back_pointer(checkout, admin_dir).map_err(io(&dot_git))?;
+        Ok(())
+    }
+
+    /// Write the new worktree's `HEAD` through a reference store scoped to `admin_dir`.
+    ///
+    /// Git does the same: it sets up the worktree's own reference store and writes `HEAD` through
+    /// it, which is what produces `worktrees/<id>/logs/HEAD`. Writing the file directly skips the
+    /// reflog, and reimplementing the reflog by hand would mean reimplementing
+    /// `core.logAllRefUpdates` and the rule that bare repositories keep none. The store already
+    /// knows both.
+    ///
+    /// The reflog message is empty because Git's is: `builtin/worktree.c` passes none to either
+    /// `refs_update_ref` or `refs_update_symref`. The `checkout: moving from ...` text one might
+    /// expect is written by the checkout Git runs afterwards, which this `--no-checkout` shape
+    /// never performs.
+    ///
+    /// `gix-ref` logs a *symbolic* update only when the expectation names an object, which is the
+    /// mechanism `clone` uses to record its initial `HEAD`, so the branch case supplies the branch
+    /// tip. An unborn branch has no tip and gets no reflog, as in Git.
+    fn write_worktree_head(
+        &self,
+        admin_dir: &std::path::Path,
+        attach: &add::Attachment,
+    ) -> Result<(), Exn<add::Error>> {
+        use add::{Attachment, Error};
+        use gix_ref::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
+
+        let store = crate::RefStore::for_linked_worktree_opts(
+            admin_dir.to_owned(),
+            self.common_dir().to_owned(),
+            self.object_hash(),
+            gix_ref::store::init::Options {
+                write_reflog: self.refs.write_reflog,
+                precompose_unicode: self.refs.precompose_unicode,
+                prohibit_windows_device_names: self.refs.prohibit_windows_device_names,
+            },
+        );
+
+        let (new, expected) = match attach {
+            Attachment::Branch(name) => {
+                // The tip is what lets `gix-ref` log a symbolic update at all. Its absence means an
+                // unborn branch rather than an error; `add_worktree` has already established that
+                // the branch is not in use elsewhere.
+                let tip = self
+                    .find_reference(name.as_ref())
+                    .ok()
+                    .and_then(|mut reference| reference.peel_to_id().ok())
+                    .map(|id| id.detach());
+                let expected = match tip {
+                    Some(tip) => PreviousValue::ExistingMustMatch(gix_ref::Target::Object(tip)),
+                    None => PreviousValue::MustNotExist,
+                };
+                (gix_ref::Target::Symbolic(name.clone()), expected)
+            }
+            Attachment::DetachedAt(id) => (gix_ref::Target::Object(*id), PreviousValue::MustNotExist),
+        };
+
+        let edit = RefEdit {
+            change: Change::Update {
+                log: LogChange {
+                    mode: RefLog::AndReference,
+                    force_create_reflog: false,
+                    message: Default::default(),
+                },
+                expected,
+                new,
+            },
+            name: "HEAD".try_into().expect("HEAD is always a valid reference name"),
+            deref: false,
+        };
+
+        let write_head =
+            |source: Box<dyn std::error::Error + Send + Sync + 'static>| Error::WriteHead { source }.raise();
+        let committer = self.committer().transpose().map_err(|err| write_head(Box::new(err)))?;
+        store
+            .transaction()
+            .prepare(
+                Some(edit),
+                gix_lock::acquire::Fail::Immediately,
+                gix_lock::acquire::Fail::Immediately,
+            )
+            .map_err(|err| write_head(Box::new(err)))?
+            .commit(committer)
+            .map_err(|err| write_head(Box::new(err)))?;
         Ok(())
     }
 

@@ -236,6 +236,55 @@ fn worktrees_can_be_locked_and_unlocked() -> crate::Result {
     Ok(())
 }
 
+/// Attaching to a branch takes a different route than detaching: `HEAD` becomes a *symbolic*
+/// reference, and `gix-ref` writes a reflog for a symbolic update only when the expectation names
+/// an object. Get that wrong and no reflog appears at all, silently, so it is asserted separately
+/// rather than folded into the detached case.
+#[test]
+fn added_worktrees_attached_to_a_branch_get_a_reflog() -> crate::Result {
+    use gix::repository::worktree_admin::add;
+
+    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
+    let repo = gix::open_opts(fixture.path().join("repo"), crate::restricted())?;
+    let tip = repo.head_id()?.detach();
+
+    // Every branch the fixture ships is already checked out somewhere, and attaching to one that is
+    // in use is refused by design, so this makes its own.
+    let branch = repo.reference(
+        "refs/heads/for-worktree",
+        tip,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "test setup",
+    )?;
+
+    let outcome = repo.add_worktree(
+        &fixture.path().join("attached"),
+        add::Attachment::Branch(branch.name().to_owned()),
+        add::Options::default(),
+    )?;
+
+    let head = std::fs::read_to_string(outcome.admin_dir.join("HEAD"))?;
+    assert_eq!(
+        head.trim_end(),
+        "ref: refs/heads/for-worktree",
+        "the worktree stays attached, rather than being resolved to a commit"
+    );
+
+    let logged = std::fs::read_to_string(outcome.admin_dir.join("logs").join("HEAD"))
+        .expect("a symbolic HEAD still gets a reflog, recorded through the branch tip");
+    let line = logged.lines().next().expect("one entry for the initial HEAD");
+    let (previous, rest) = line.split_once(' ').expect("`<previous> <new> <committer>`");
+    assert!(
+        previous.bytes().all(|byte| byte == b'0'),
+        "the entry starts from the null id: {line:?}"
+    );
+    assert!(
+        rest.starts_with(&tip.to_string()),
+        "and names the branch tip, which is what Git records even though HEAD is symbolic: {line:?}"
+    );
+    Ok(())
+}
+
 /// The load-bearing direction: Git must accept what we register. Reading our own writes proves
 /// only self-consistency, so this shells out to `git worktree list` and to `git status` inside the
 /// new checkout.
@@ -262,6 +311,25 @@ fn added_worktrees_are_accepted_by_git() -> crate::Result {
     assert!(
         outcome.checkout.join(".git").is_file(),
         "and the checkout points back at them"
+    );
+
+    // The reflog is what `git worktree add` leaves behind, and what `@{-N}` and
+    // `prior_checked_out_branches` later read. Writing `HEAD` as a plain file skipped it.
+    let logged = std::fs::read_to_string(outcome.admin_dir.join("logs").join("HEAD"))
+        .expect("a reflog is written for the new HEAD");
+    let line = logged.lines().next().expect("one entry for the initial HEAD");
+    let (previous, rest) = line.split_once(' ').expect("`<previous> <new> <committer>`");
+    assert!(
+        previous.bytes().all(|byte| byte == b'0'),
+        "the entry starts from the null id, as Git records for a HEAD that did not exist: {line:?}"
+    );
+    assert!(
+        rest.starts_with(&repo.head_id()?.to_string()),
+        "and moves to the commit we attached to: {line:?}"
+    );
+    assert!(
+        !line.contains('\t'),
+        "Git passes no message here, and an empty message is written without a separator: {line:?}"
     );
 
     // Git's own view is the real test.
