@@ -17,7 +17,11 @@ fn cone_mode_matches_git_and_disable_restores_everything() -> crate::Result {
     let git_repo = open(&git_root)?;
     let mut repo = open(&gix_root)?;
     repo.set_sparse_checkout(
-        gix::index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched,
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(true),
+            sparse_index: Some(false),
+            ..Default::default()
+        },
         ["src/deep"],
     )?;
 
@@ -72,7 +76,11 @@ fn sparse_index_matches_git_and_transitions_back_to_full_indexes() -> crate::Res
     )?;
     let mut repo = open(&gix_root)?;
     repo.set_sparse_checkout(
-        gix::index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs,
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(true),
+            sparse_index: Some(true),
+            ..Default::default()
+        },
         ["src/deep"],
     )?;
 
@@ -94,7 +102,10 @@ fn sparse_index_matches_git_and_transitions_back_to_full_indexes() -> crate::Res
         &["sparse-checkout", "set", "--no-cone", patterns[0]],
     )?;
     repo.set_sparse_checkout(
-        gix::index::sparse::Mode::IncludeByIgnorePatternStoreAllEntriesSkipUnmatched,
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(false),
+            ..Default::default()
+        },
         patterns,
     )?;
     let git_repo = open(&git_root)?;
@@ -107,7 +118,11 @@ fn sparse_index_matches_git_and_transitions_back_to_full_indexes() -> crate::Res
         &["sparse-checkout", "set", "--cone", "--sparse-index", "src/deep"],
     )?;
     repo.set_sparse_checkout(
-        gix::index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs,
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(true),
+            sparse_index: Some(true),
+            ..Default::default()
+        },
         ["src/deep"],
     )?;
     assert!(repo.open_index()?.is_sparse());
@@ -144,7 +159,11 @@ fn sparse_index_preserves_staged_changes_outside_the_cone() -> crate::Result {
     )?;
     let mut repo = open(&gix_root)?;
     repo.set_sparse_checkout(
-        gix::index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs,
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(true),
+            sparse_index: Some(true),
+            ..Default::default()
+        },
         ["src/deep"],
     )?;
 
@@ -199,7 +218,10 @@ fn pattern_mode_matches_git_with_negation_anchoring_and_last_match_wins() -> cra
     let git_repo = open(&git_root)?;
     let mut repo = open(&gix_root)?;
     repo.set_sparse_checkout(
-        gix::index::sparse::Mode::IncludeByIgnorePatternStoreAllEntriesSkipUnmatched,
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(false),
+            ..Default::default()
+        },
         patterns,
     )?;
 
@@ -253,7 +275,11 @@ fn linked_worktree_configuration_and_definition_are_isolated() -> crate::Result 
     );
 
     linked_repo.set_sparse_checkout(
-        gix::index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched,
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(true),
+            sparse_index: Some(false),
+            ..Default::default()
+        },
         ["src/deep"],
     )?;
 
@@ -302,7 +328,10 @@ fn modified_and_obstructed_exclusions_are_preserved() -> crate::Result {
 
     let mut repo = open(&root)?;
     repo.set_sparse_checkout(
-        gix::index::sparse::Mode::IncludeByIgnorePatternStoreAllEntriesSkipUnmatched,
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(false),
+            ..Default::default()
+        },
         ["/src/"],
     )?;
 
@@ -363,7 +392,11 @@ fn a_failure_enabling_the_config_removes_nothing_and_writes_no_definition() -> c
 
     let err = repo
         .set_sparse_checkout(
-            gix::index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched,
+            gix::repository::sparse_checkout::set::Options {
+                cone: Some(true),
+                sparse_index: Some(false),
+                ..Default::default()
+            },
             ["src/deep"],
         )
         .expect_err("the config is locked, so enabling sparse checkout cannot succeed");

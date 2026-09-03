@@ -116,23 +116,121 @@ enum Definition {
     },
 }
 
+/// Options for [`set_sparse_checkout()`](crate::Repository::set_sparse_checkout()).
+pub mod set {
+    /// How the sparse-checkout should be shaped.
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct Options {
+        /// Treat items as directory names rather than gitignore-style patterns.
+        ///
+        /// `None` keeps whatever the repository is already configured with, which is what Git does
+        /// when the flag is absent - `update_modes()` in `builtin/sparse-checkout.c` carries an
+        /// unspecified mode as `-1`. When sparse checkout is not yet active there is nothing to
+        /// keep, and Git falls back to cone mode, so `None` means cone in that case too.
+        pub cone: Option<bool>,
+        /// Store excluded directories as single entries rather than expanding them, Git's
+        /// `--sparse-index`.
+        ///
+        /// `None` keeps the current setting. Only meaningful alongside cone mode; a pattern-mode
+        /// definition cannot be represented as a sparse index and this is ignored there.
+        pub sparse_index: Option<bool>,
+        /// Skip the heuristics that reject items which look like patterns rather than directories.
+        ///
+        /// This covers exactly what Git's `--skip-checks` covers: a leading `!`, the glob
+        /// characters `*?[]`, and an item naming a tracked file rather than a directory. A
+        /// directory really can be called `!notes` or contain a bracket, which is why the escape
+        /// hatch exists.
+        ///
+        /// It does **not** relax validation that exists for correctness. A NUL or newline would
+        /// corrupt the definition file's one-item-per-line format, and a `..` component would
+        /// escape the repository; both are always refused.
+        pub skip_checks: bool,
+    }
+
+    impl Options {
+        /// Resolve against `current`, the sparse configuration the index was opened with.
+        pub(super) fn resolve(&self, current: gix_index::sparse::Options) -> gix_index::sparse::Mode {
+            // Git defaults an unspecified cone mode to cone unless a sparse checkout is already
+            // active, in which case it keeps what that one uses. `update_cone_mode()`.
+            let cone = self.cone.unwrap_or(if current.sparse_checkout {
+                current.directory_patterns_only
+            } else {
+                true
+            });
+            gix_index::sparse::Options {
+                sparse_checkout: true,
+                directory_patterns_only: cone,
+                write_sparse_index: cone && self.sparse_index.unwrap_or(current.write_sparse_index),
+            }
+            .sparse_mode()
+        }
+    }
+}
+
+/// Whether a call is the one that determines the definition, or is re-applying one already
+/// recorded.
+#[derive(Debug, Clone, Copy)]
+enum DefinitionOnDisk {
+    /// Record it once the worktree and index match.
+    Write,
+    /// Leave the file alone; it is the input rather than the output.
+    ///
+    /// Unused until `reapply` lands, which is the verb that reads the definition rather than
+    /// deciding it. The variant exists now because it is what the extracted apply core was shaped
+    /// around: without it the write is a step rather than a parameter, and `reapply` cannot reuse
+    /// the core at all.
+    #[allow(dead_code)]
+    LeaveAsIs,
+}
+
+/// Turn caller-supplied items into a definition appropriate for `mode`.
+fn build_definition(
+    repo: &crate::Repository,
+    mode: gix_index::sparse::Mode,
+    items: impl IntoIterator<Item = impl Into<BString>>,
+    skip_checks: bool,
+) -> Result<Definition, Error> {
+    Ok(match mode {
+        gix_index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs
+        | gix_index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched => {
+            let directories = normalize_cone_directories(repo, items.into_iter().map(Into::into), skip_checks)?;
+            let bytes = cone_definition(&directories);
+            Definition::Cone { directories, bytes }
+        }
+        gix_index::sparse::Mode::IncludeByIgnorePatternStoreAllEntriesSkipUnmatched => {
+            let patterns = normalize_patterns(items.into_iter().map(Into::into))?;
+            let bytes = pattern_definition(&patterns);
+            Definition::Patterns { bytes }
+        }
+        other => return Err(Error::UnsupportedMode(other)),
+    })
+}
+
 impl crate::Repository {
     /// Set the sparse-checkout definition and update the worktree and index to match it.
     ///
-    /// Cone mode accepts repository-relative directory names. Pattern mode accepts one
-    /// gitignore-syntax pattern per item, with sparse-checkout polarity: a positive match
-    /// includes a path and a leading exclamation mark excludes it. The last matching pattern
-    /// wins and unmatched paths are excluded.
+    /// In cone mode `items` are repository-relative directory names. In pattern mode they are
+    /// gitignore-syntax patterns with sparse-checkout polarity: a positive match includes a path
+    /// and a leading exclamation mark excludes it, the last matching pattern wins, and unmatched
+    /// paths are excluded.
     ///
-    /// Use IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs for Git-compatible
-    /// `--sparse-index` cone mode, IncludeDirectoriesStoreAllEntriesSkipUnmatched for
-    /// a full cone-mode index, or IncludeByIgnorePatternStoreAllEntriesSkipUnmatched
-    /// for pattern mode.
+    /// See [`set::Options`] for how the mode is chosen when it is not stated.
     pub fn set_sparse_checkout(
         &mut self,
-        mode: gix_index::sparse::Mode,
+        options: set::Options,
         items: impl IntoIterator<Item = impl Into<BString>>,
     ) -> Result<(), Error> {
+        let (workdir, mut index) = self.open_for_sparse_update()?;
+        let mode = options.resolve(index.sparse_options());
+        let definition = build_definition(self, mode, items, options.skip_checks)?;
+        self.apply_sparse_definition(&workdir, &mut index, &definition, mode, DefinitionOnDisk::Write)
+    }
+
+    /// Open the index and bring it to a shape the sparse-checkout machinery can work on.
+    ///
+    /// Shared by every verb: a sparse index has to be expanded first, because inclusion is decided
+    /// per entry and a directory entry stands for many.
+    fn open_for_sparse_update(&self) -> Result<(std::path::PathBuf, gix_index::File), Error> {
         let workdir = self.workdir().ok_or(Error::MissingWorktree)?.to_owned();
         let mut index = self
             .open_index()
@@ -145,31 +243,35 @@ impl crate::Repository {
             .expand_sparse_index(&*self, validate)
             .map_err(Error::SparseIndexExpand)?;
         reject_unrepresentable_index(&index)?;
+        Ok((workdir, index))
+    }
 
-        let definition = match mode {
-            gix_index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs
-            | gix_index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched => {
-                let directories = normalize_cone_directories(self, items.into_iter().map(Into::into))?;
-                let bytes = cone_definition(&directories);
-                Definition::Cone { directories, bytes }
-            }
-            gix_index::sparse::Mode::IncludeByIgnorePatternStoreAllEntriesSkipUnmatched => {
-                let patterns = normalize_patterns(items.into_iter().map(Into::into))?;
-                let bytes = pattern_definition(&patterns);
-                Definition::Patterns { bytes }
-            }
-            other => return Err(Error::UnsupportedMode(other)),
-        };
-
+    /// Bring the worktree and index to `definition`, then record it according to `on_disk`.
+    ///
+    /// This is the half that every verb shares. Git draws the same line: `update_working_directory`
+    /// applies a pattern list, and `write_patterns_and_update` wraps it with the write. `reapply`
+    /// calls only the former, which is why the write is a parameter here rather than a step.
+    ///
+    /// The step order is load-bearing and every step fails open, leaving surplus files rather than
+    /// missing ones: materialise, write the index, enable the config, remove, record the
+    /// definition, compress. See the comments at each point for why.
+    fn apply_sparse_definition(
+        &mut self,
+        workdir: &std::path::Path,
+        index: &mut gix_index::File,
+        definition: &Definition,
+        mode: gix_index::sparse::Mode,
+        on_disk: DefinitionOnDisk,
+    ) -> Result<(), Error> {
         let definition_path = sparse_checkout_path(self);
 
-        let paths = index_paths(&index);
+        let paths = index_paths(index);
         let case = if self.config.ignore_case {
             gix_glob::pattern::Case::Fold
         } else {
             gix_glob::pattern::Case::Sensitive
         };
-        let included = match &definition {
+        let included = match definition {
             Definition::Cone { directories, .. } => paths
                 .iter()
                 .map(|path| cone_includes(path.as_bstr(), directories, case))
@@ -193,7 +295,7 @@ impl crate::Repository {
         for (idx, path) in paths.iter().enumerate() {
             presence.push(path_presence(
                 self,
-                &workdir,
+                workdir,
                 path.as_bstr(),
                 index.entries()[idx].mode,
             )?);
@@ -212,7 +314,7 @@ impl crate::Repository {
                 .then_some(idx)
             })
             .collect();
-        materialize_entries(self, &workdir, &mut index, &materialize)?;
+        materialize_entries(self, workdir, index, &materialize)?;
 
         let removable: Vec<usize> = included
             .iter()
@@ -227,7 +329,7 @@ impl crate::Repository {
                 .then_some(idx)
             })
             .collect();
-        let dirty = dirty_entries(self, &workdir, &index, &removable)?;
+        let dirty = dirty_entries(self, workdir, index, &removable)?;
 
         let removable: BTreeSet<usize> = removable
             .into_iter()
@@ -244,7 +346,7 @@ impl crate::Repository {
                 }
             }
         }
-        write_index(&mut index)?;
+        write_index(index)?;
 
         // Enabled before anything is removed. If this fails, the worktree still holds every file it
         // held when we started: surplus files, never missing ones. Git sets the config first for the
@@ -255,21 +357,21 @@ impl crate::Repository {
         for idx in removable {
             let path = entry_worktree_path(
                 self,
-                &workdir,
+                workdir,
                 paths[idx].as_bstr(),
                 index.entries()[idx].mode,
             )?;
             if !remove_tracked_path(&path) {
                 removal_failed.push(idx);
             } else {
-                remove_empty_parents(path.parent(), &workdir);
+                remove_empty_parents(path.parent(), workdir);
             }
         }
         if !removal_failed.is_empty() {
             for idx in removal_failed {
                 clear_skip_worktree(&mut index.entries_mut()[idx]);
             }
-            write_index(&mut index)?;
+            write_index(index)?;
         }
 
         // The definition goes down once the worktree and index match it. Git writes it only after
@@ -277,7 +379,9 @@ impl crate::Repository {
         // `builtin/sparse-checkout.c` - and that ordering is the whole guarantee: a definition on
         // disk is one that was applied. Writing it first meant a failure anywhere above left
         // `list_sparse_checkout` reporting a definition the worktree had never been brought to.
-        write_locked_bytes(&definition_path, definition.bytes())?;
+        if matches!(on_disk, DefinitionOnDisk::Write) {
+            write_locked_bytes(&definition_path, definition.bytes())?;
+        }
 
         // Purely a representation change - a sparse index and a full one describe the same checkout
         // - so it follows the definition rather than preceding it. Failing here leaves an
@@ -286,7 +390,7 @@ impl crate::Repository {
             index
                 .convert_to_sparse_index(|tree| gix_object::Write::write(&*self, tree))
                 .map_err(Error::SparseIndexCompress)?;
-            write_index(&mut index)?;
+            write_index(index)?;
         }
         Ok(())
     }
@@ -477,6 +581,7 @@ fn pattern_includes(
 fn normalize_cone_directories(
     repo: &crate::Repository,
     directories: impl Iterator<Item = BString>,
+    skip_checks: bool,
 ) -> Result<Vec<BString>, Error> {
     let options = repo
         .config
@@ -495,6 +600,25 @@ fn normalize_cone_directories(
                 directory: original,
                 reason: "directory names must be repository-relative".into(),
             });
+        }
+        // Heuristics, and only these three, are what `skip_checks` waives. They catch someone
+        // passing patterns where cone mode wants directories, which is a common mistake and a
+        // confusing one because the result silently matches nothing. But a directory really can be
+        // named `!notes` or contain a bracket, so there has to be a way through. Git draws the line
+        // in the same place, in `sanitize_paths()`.
+        if !skip_checks {
+            if original.starts_with(b"!") {
+                return Err(Error::InvalidConeDirectory {
+                    directory: original,
+                    reason: "cone mode takes directories, not patterns; pass skip_checks for a directory that really starts with '!'".into(),
+                });
+            }
+            if original.iter().any(|byte| matches!(*byte, b'*' | b'?' | b'[' | b']')) {
+                return Err(Error::InvalidConeDirectory {
+                    directory: original,
+                    reason: "cone mode takes directories, not patterns; pass skip_checks for a directory that really contains '*?[]'".into(),
+                });
+            }
         }
         let mut directory = original.as_bstr();
         while directory.ends_with(b"/") {
