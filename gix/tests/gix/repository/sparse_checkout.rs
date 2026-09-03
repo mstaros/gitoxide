@@ -333,6 +333,64 @@ fn open(path: &Path) -> Result<gix::Repository, gix::open::Error> {
     gix::open_opts(path, gix::open::Options::isolated())
 }
 
+/// The write order is the whole guarantee, and it is only observable when something fails partway.
+///
+/// `enable_sparse_config` takes its config lock with `Fail::Immediately`, so an existing lock file
+/// makes it fail through the real locking path rather than through a test-only hook. It runs after
+/// materialisation and before any file is removed, which is what makes the failure fail *open*:
+/// the worktree keeps every file it had, and no definition is written, so `list_sparse_checkout`
+/// cannot report a definition that was never applied.
+///
+/// The index does keep the SKIP_WORKTREE bits written just before this point. That is harmless and
+/// recoverable: inclusion is recomputed from what is actually on disk, so repeating the call - or
+/// disabling - converges.
+#[test]
+fn a_failure_enabling_the_config_removes_nothing_and_writes_no_definition() -> crate::Result {
+    let temp = gix_testtools::tempfile::TempDir::new()?;
+    let root = temp.path().join("subject");
+    make_repository(&root)?;
+
+    let mut repo = open(&root)?;
+    let before = worktree_files(&root)?;
+    let definition = repo.git_dir().join("info").join("sparse-checkout");
+    assert!(!definition.exists(), "nothing has configured sparse checkout yet");
+
+    // Both, so the outcome does not depend on which of the two files is written first.
+    let common_lock = repo.common_dir().join("config.lock");
+    let worktree_lock = repo.git_dir().join("config.worktree.lock");
+    std::fs::write(&common_lock, "")?;
+    std::fs::write(&worktree_lock, "")?;
+
+    let err = repo
+        .set_sparse_checkout(
+            gix::index::sparse::Mode::IncludeDirectoriesStoreAllEntriesSkipUnmatched,
+            ["src/deep"],
+        )
+        .expect_err("the config is locked, so enabling sparse checkout cannot succeed");
+
+    // Asserting the variant, not merely that something failed. Had the call died earlier - during
+    // materialisation, say - every assertion below would still hold and the test would prove
+    // nothing about where the config write sits in the order.
+    assert!(
+        matches!(err, gix::repository::sparse_checkout::Error::ConfigLock { .. }),
+        "it failed at the config write specifically, which is the step being ordered: {err:?}"
+    );
+
+    assert_eq!(
+        worktree_files(&root)?,
+        before,
+        "no file was removed, only the config write failed: {err}"
+    );
+    assert!(
+        !definition.exists(),
+        "and no definition was left behind claiming a state the worktree was never brought to"
+    );
+
+    std::fs::remove_file(&common_lock)?;
+    std::fs::remove_file(&worktree_lock)?;
+    Ok(())
+}
+
 fn make_repository(root: &Path) -> crate::Result {
     std::fs::create_dir_all(root)?;
     git(root, &["init", "-q"])?;

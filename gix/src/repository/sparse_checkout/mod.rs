@@ -162,7 +162,6 @@ impl crate::Repository {
         };
 
         let definition_path = sparse_checkout_path(self);
-        write_locked_bytes(&definition_path, definition.bytes())?;
 
         let paths = index_paths(&index);
         let case = if self.config.ignore_case {
@@ -247,6 +246,11 @@ impl crate::Repository {
         }
         write_index(&mut index)?;
 
+        // Enabled before anything is removed. If this fails, the worktree still holds every file it
+        // held when we started: surplus files, never missing ones. Git sets the config first for the
+        // same reason - `update_modes` runs before `write_patterns_and_update`.
+        enable_sparse_config(self, mode)?;
+
         let mut removal_failed = Vec::new();
         for idx in removable {
             let path = entry_worktree_path(
@@ -268,14 +272,21 @@ impl crate::Repository {
             write_index(&mut index)?;
         }
 
+        // The definition goes down once the worktree and index match it. Git writes it only after
+        // `update_working_directory` succeeds - `write_patterns_and_update` in
+        // `builtin/sparse-checkout.c` - and that ordering is the whole guarantee: a definition on
+        // disk is one that was applied. Writing it first meant a failure anywhere above left
+        // `list_sparse_checkout` reporting a definition the worktree had never been brought to.
+        write_locked_bytes(&definition_path, definition.bytes())?;
+
+        // Purely a representation change - a sparse index and a full one describe the same checkout
+        // - so it follows the definition rather than preceding it. Failing here leaves an
+        // uncompressed index that is still correct.
         if mode == gix_index::sparse::Mode::IncludeDirectoriesStoreIncludedEntriesAndExcludedDirs {
             index
                 .convert_to_sparse_index(|tree| gix_object::Write::write(&*self, tree))
                 .map_err(Error::SparseIndexCompress)?;
-            enable_sparse_config(self, mode)?;
             write_index(&mut index)?;
-        } else {
-            enable_sparse_config(self, mode)?;
         }
         Ok(())
     }
