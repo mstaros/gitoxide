@@ -596,8 +596,8 @@ name = "gix-ffi"
 version = "0.1.0"
 dependencies = [
  "gix",
- "interoptopus",
- "interoptopus_csharp",
+ "interoptopus_csharp_mps",
+ "interoptopus_mps",
 ]
 
 [[package]]
@@ -1219,44 +1219,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaec953f16e5bcf6b8a3cb3aa959b17e5577dbd2693e94554c462c08be22624b"
 
 [[package]]
-name = "interoptopus"
-version = "0.16.4"
+name = "interoptopus_backends_mps"
+version = "0.17.1"
+source = "registry+file:///D:/feeds/LocalCargo/"
+checksum = "146ef2175781e4443efd5050c05920d8abb02b9b11a5a76b85c42fb7fb1df61f"
 dependencies = [
- "interoptopus_proc",
-]
-
-[[package]]
-name = "interoptopus_backends"
-version = "0.16.4"
-dependencies = [
- "interoptopus",
+ "interoptopus_mps",
  "tar",
  "tera",
 ]
 
 [[package]]
-name = "interoptopus_csharp"
-version = "0.16.4"
+name = "interoptopus_csharp_mps"
+version = "0.17.1"
+source = "registry+file:///D:/feeds/LocalCargo/"
+checksum = "f06921078be8578493c3b4509b3da6bae0a287d41099340a23c96385f05c995a"
 dependencies = [
- "interoptopus",
- "interoptopus_backends",
+ "interoptopus_backends_mps",
+ "interoptopus_mps",
 ]
 
 [[package]]
-name = "interoptopus_proc"
-version = "0.16.4"
+name = "interoptopus_mps"
+version = "0.17.1"
+source = "registry+file:///D:/feeds/LocalCargo/"
+checksum = "8fc16bbf1f723a869fa6422f1d1d81969e425e919288d49e29e6aca77a52540a"
 dependencies = [
- "interoptopus_proc_impl",
+ "interoptopus_proc_mps",
 ]
 
 [[package]]
-name = "interoptopus_proc_impl"
-version = "0.16.4"
+name = "interoptopus_proc_impl_mps"
+version = "0.17.1"
+source = "registry+file:///D:/feeds/LocalCargo/"
+checksum = "1f565541ad550ebd94c0ecc942071a8dcdf0e9624f2e6fce12445855ad84b82b"
 dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "interoptopus_proc_mps"
+version = "0.17.1"
+source = "registry+file:///D:/feeds/LocalCargo/"
+checksum = "e2c656d9d26e4f7269bb525ac6f5649b49c1e7af5e08921fb13373c3c92b380d"
+dependencies = [
+ "interoptopus_proc_impl_mps",
 ]
 
 [[package]]
