@@ -571,6 +571,32 @@ impl Repo {
         self.inner.to_thread_local().is_shallow()
     }
 
+    /// Owned shallow-boundary object IDs in gix order, empty for complete history.
+    pub fn shallow_commits(&self) -> ffi::Result<ffi::Vec<ffi::String>, GixError> {
+        let repo = self.inner.to_thread_local();
+        // Managed calls return fresh owned snapshots. An mtime-only cache can hide
+        // a replacement or newly malformed file whose timestamp did not advance.
+        let commits = match gix_shallow::read(&repo.shallow_file()) {
+            Ok(commits) => commits,
+            Err(err) => {
+                let message = chain_to_string(&err);
+                return ffi::Err(match err {
+                    gix::shallow::read::Error::Io(_) => GixError::Io(message),
+                    gix::shallow::read::Error::DecodeHash(_) => GixError::InvalidId(message),
+                });
+            }
+        };
+        let ids: Vec<ffi::String> = commits
+            .map(|commits| commits.iter().map(|id| hex(id.as_ref())).collect())
+            .unwrap_or_default();
+        ffi::Ok(ffi::Vec::from(ids))
+    }
+
+    /// Configured shallow-file location as owned platform bytes; the file may not exist.
+    pub fn shallow_file(&self) -> ffi::Vec<u8> {
+        path_bytes(&self.inner.to_thread_local().shallow_file())
+    }
+
     /// Where `HEAD` currently points.
     pub fn head(&self) -> ffi::Result<HeadInfo, GixError> {
         let repo = self.inner.to_thread_local();

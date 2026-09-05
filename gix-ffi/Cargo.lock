@@ -596,6 +596,7 @@ name = "gix-ffi"
 version = "0.1.0"
 dependencies = [
  "gix",
+ "gix-shallow",
  "interoptopus_csharp_mps",
  "interoptopus_mps",
 ]

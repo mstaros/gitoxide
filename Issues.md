@@ -265,7 +265,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 
 - [ ] Repository open/discovery options, environment/trust/config overrides, operation state, locations and workdir controls — `open/options.rs`, `repository/{state,location}.rs`, `lib.rs`.
 - [x] `Repository::is_shallow` → `GixRepository.IsShallow`, including same-handle observation after unshallow.
-- [ ] Shallow commit boundary information and shallow-file location — `repository/shallow.rs::{shallow_commits,shallow_file}`.
+- [x] Shallow commit boundary information and shallow-file location — `GixRepository.GetShallowCommits`, `ShallowFilePath` and byte-preserving `ShallowFile()`; transaction `617a0c2ea46d9ae649f97241`. Fresh owned snapshots use the direct `gix-shallow` reader so unchanged timestamps cannot hide replacement or corrupt data. Clone/deepen/unshallow, empty/malformed/unreadable files, configured paths and linked worktrees are tested.
 - [ ] Repository object/cache controls — `repository/cache.rs`.
 - [x] `Repository::has_object` → `GixRepository.HasObject`; valid missing IDs return false and malformed/wrong-format IDs remain errors.
 - [x] `Repository::write_blob` → `GixRepository.WriteBlob(byte[])`; exact bytes, empty blobs, normal/bare repositories and managed disposal tested.
@@ -293,7 +293,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 
 ### Boundary, delivery and completion
 
-- [ ] Complete named/multi-field Rust enum support in Interoptopus — `docs/csharp-multi-field-variants.md`; Steps 1–2 are done (`dbb6c0d` completes Step 2), Steps 3–5 remain.
+- [ ] Complete named/multi-field Rust enum support in Interoptopus — `docs/csharp-multi-field-variants.md`; Steps 1–4 are done (`fcff19e78` completes Steps 3–4); Step 5 and an explicitly patched generator-suite launch remain.
 - [x] Make the GixError mapper exhaustive with generated case types and promote missing-case diagnostic CS8509 to an error; compiler probe and managed behavior verified.
 - [ ] P0b stable error envelope: Kind, extensible Code, retryability and actionable typed recovery detail.
 - [ ] P0c bounded structured cursors with terminal/error semantics and ownership-closure checks.
@@ -305,7 +305,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Complete CSharpMpc consumer migration and its full tests — issue `2c6f1a0f`.
 - [ ] Full gix coverage: every public capability accounted for, implemented through the managed boundary, validated, integrated and checked above.
 
-Latest validated expansion on 2026-09-05: ignore/local-exclude transaction `f5f6689c91e8ace3f5dd7828`, gix-ffi 47/47 native tests and GixSharp 68/68 managed tests. Managed build `op_8484ab4d7bdd4f72` and patched-runtime run `op_ea21d21f00a54bc7` succeeded. The preceding diff/scalar expansion integrated as `22c1da145e895e0f57768cdbffec6ed37df6161b` with 41 native and 63 managed tests. The earlier foundation at `b3f28217` had 31 native and 54 managed tests. These totals are validation evidence, not a coverage percentage.
+Latest validated expansion on 2026-09-05: shallow boundary/location transaction `617a0c2ea46d9ae649f97241`, gix-ffi 50/50 native tests and GixSharp 71/71 managed tests. Native run `a988982311282be8300531e7bda388cf`, managed build `op_1b5738b5e9fe431e` and patched-runtime run `op_88bad4eb45094c28` succeeded. The preceding ignore/local-exclude slice integrated as `c051d7844c5a94cd606215de9d3ea951a98c715f` with 47 native and 68 managed tests; the diff/scalar slice `22c1da14` passed 41 native and 63 managed tests. These totals are validation evidence, not a coverage percentage.
 
 ## Sequencing evidence
 
