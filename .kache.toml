@@ -1,0 +1,2 @@
+[cache]
+key_env_vars = ["CARGO_MANIFEST_DIR", "CARGO_TARGET_DIR", "CARGO_TARGET_TMPDIR", "CARGO_BIN_EXE_*"]
