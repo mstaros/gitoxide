@@ -366,7 +366,9 @@ fn configured_signature(
 }
 
 fn tree_from_index(repo: &gix::Repository) -> Result<gix::ObjectId, GixError> {
-    let index = repo.index_or_empty().map_err(|err| other(&err))?;
+    // Fresh from disk: a commit created immediately after `stage` must not build its tree
+    // from a cached pre-stage index. See `index::owned_index`.
+    let index = crate::index::owned_index(repo)?;
     let mut editor = repo
         .edit_tree(gix::ObjectId::empty_tree(repo.object_hash()))
         .map_err(|err| other(&err))?;
