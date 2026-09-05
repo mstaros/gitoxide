@@ -6,6 +6,57 @@ use crate::{named_repo, repo_rw};
 mod credential_helpers;
 
 #[test]
+fn raw_reload_preserves_context_and_allows_invalid_typed_values() -> crate::Result {
+    let temp = gix_testtools::tempfile::TempDir::new()?;
+    let path = temp.path().join("repository");
+    let initialized = gix::init(&path)?;
+    let config_path = initialized.git_dir().join("config");
+    std::fs::write(
+        &config_path,
+        b"[core]\n repositoryFormatVersion = 0\n bare = false\n[wrapper]\n value = initial\n",
+    )?;
+    let mut options = gix::open::Options::isolated()
+        .strict_config(true)
+        .cli_overrides(["wrapper.override=cli", "wrapper.cli=cli"])
+        .config_overrides(["wrapper.override=api"]);
+    let without_includes = gix::open_opts(&path, options.clone())?;
+    options.permissions.config.includes = true;
+    let mut repo = gix::open_opts(&path, options)?;
+    repo.config_snapshot_mut().set_raw_value("wrapper.transient", "memory only")?;
+    let snapshot = repo.config_snapshot();
+
+    std::fs::write(repo.git_dir().join("HEAD"), b"ref: refs/heads/raw-reload\n")?;
+    std::fs::write(
+        repo.git_dir().join("included"),
+        b"[wrapper]\n included = selected\n raw = \xff\n implicit\n",
+    )?;
+    std::fs::write(
+        &config_path,
+        b"[core]\n repositoryFormatVersion = invalid\n[wrapper]\n value = changed\n[includeIf \"onbranch:raw-reload\"]\n path = included\n",
+    )?;
+    let fresh = snapshot.reload()?;
+    assert_eq!(fresh.string("core.repositoryFormatVersion"), Some("invalid".into()));
+    assert_eq!(fresh.string("wrapper.value"), Some("changed".into()));
+    assert_eq!(fresh.string("wrapper.included"), Some("selected".into()));
+    assert_eq!(fresh.string("wrapper.raw"), Some(gix::bstr::BString::from(vec![0xff])));
+    assert_eq!(fresh.boolean("wrapper.implicit")?, Some(true));
+    assert_eq!(fresh.string("wrapper.override"), Some("api".into()));
+    assert_eq!(fresh.string("wrapper.cli"), Some("cli".into()));
+    assert_eq!(fresh.string("wrapper.transient"), None, "disk reload omits transient snapshot edits");
+    assert_eq!(snapshot.string("wrapper.value"), Some("initial".into()), "the original snapshot remains frozen");
+    assert_eq!(snapshot.integer("core.repositoryFormatVersion"), Some(0));
+    assert!(gix::open(&path).is_err(), "typed repository opening rejects the raw value");
+    assert_eq!(
+        without_includes.config_snapshot().reload()?.string("wrapper.included"),
+        None,
+        "raw loading retains the original include permission"
+    );
+    std::fs::write(&config_path, b"[broken")?;
+    assert!(snapshot.reload().is_err(), "strict raw loading still reports configuration syntax errors");
+    Ok(())
+}
+
+#[test]
 fn commit_auto_rollback() -> crate::Result {
     let mut repo = named_repo("make_basic_repo.sh")?;
     let default_abbrev = repo.head_id()?.to_string()[..7].to_owned();

@@ -26,6 +26,7 @@ use interoptopus::inventory::RustInventory;
 use interoptopus::{builtins_string, builtins_vec, guard, service};
 
 mod byte_stream;
+mod configuration;
 mod index;
 mod ignore;
 mod diff;
@@ -560,6 +561,38 @@ impl Repo {
         match ignore::ensure_local_exclude(&repo, path.as_slice(), is_directory) {
             Ok(()) => ffi::Ok(()),
             Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Read a configuration string as exact bytes, following repository configuration precedence.
+    pub fn get_config_string(&self, name: ffi::Slice<u8>) -> ffi::Result<ffi::Vec<u8>, GixError> {
+        match configuration::get(&self.inner.to_thread_local(), name.as_slice()) {
+            Ok(value) => ffi::Ok(value.into()),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Atomically set a unique direct key in the common repository-local config.
+    pub fn set_config_string(&mut self, name: ffi::Slice<u8>, new_value: ffi::Slice<u8>) -> ffi::Result<(), GixError> {
+        let mut repo = self.inner.to_thread_local();
+        match configuration::edit(&mut repo, name.as_slice(), Some(new_value.as_slice())) {
+            Ok(_) => {
+                self.inner = repo.into_sync();
+                ffi::Ok(())
+            }
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Delete a unique direct local key, returning false when it is absent at that level.
+    pub fn delete_config_value(&mut self, name: ffi::Slice<u8>) -> ffi::Result<bool, GixError> {
+        let mut repo = self.inner.to_thread_local();
+        match configuration::edit(&mut repo, name.as_slice(), None) {
+            Ok(existed) => {
+                self.inner = repo.into_sync();
+                ffi::Ok(existed)
+            }
+            Err(error) => ffi::Err(error),
         }
     }
 

@@ -111,7 +111,7 @@ fn legacy_object_hash() -> Result<gix_hash::Kind, Error> {
     }
 }
 
-fn load_config(
+pub(crate) fn load_config(
     config_path: std::path::PathBuf,
     buf: &mut Vec<u8>,
     source: gix_config::Source,

@@ -1,7 +1,7 @@
 use super::{Cache, Error};
 
 mod incubate;
-pub(crate) use incubate::StageOne;
+pub(crate) use incubate::{StageOne, load_config};
 
 mod init;
 pub(crate) use init::load;
