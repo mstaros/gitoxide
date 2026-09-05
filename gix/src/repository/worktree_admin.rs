@@ -648,14 +648,10 @@ impl crate::Repository {
     /// interruption, and a caller finishing that retry should not have to distinguish "I removed
     /// it" from "it was already gone" by parsing an error.
     ///
-    /// Without `force`, a locked worktree is refused, and so is one whose checkout has changes.
-    ///
-    /// ### Divergence from Git
-    ///
-    /// The cleanliness check uses [`is_dirty()`](crate::Repository::is_dirty()), which compares
-    /// index, tree and worktree but **ignores untracked files**. Git additionally refuses to
-    /// remove a worktree containing untracked files. A worktree holding only untracked files is
-    /// therefore removed here without `force` where Git would refuse.
+    /// Without `force`, a locked worktree is refused, as is a checkout with staged, tracked or
+    /// nonignored untracked changes. Status errors are propagated instead of treated as clean.
+    /// A registration without an index is removable only when its checkout contains just `.git`.
+    /// Untracked files are checked even when `status.showUntrackedFiles` hides them.
     pub fn remove_worktree(
         &self,
         id: &crate::bstr::BStr,
@@ -685,27 +681,63 @@ impl crate::Repository {
                 }
                 .raise());
             }
-            // A registered worktree that was never materialised has no index, and comparing it
-            // against HEAD would report every tracked file as deleted — "unpopulated" is not
-            // "dirty", and there is nothing there to lose. Registration and materialisation are
-            // separate steps here, so this intermediate state is normal rather than exceptional.
-            if entry.condition.is_registered() && entry.admin_dir.join("index").exists() {
-                let worktree_repo = crate::worktree::Proxy::new(self, entry.admin_dir.clone())
-                    .into_repo_with_possibly_inaccessible_worktree()
-                    .map_err(|err| {
-                        Error::Status {
-                            id: entry.id.clone(),
-                            source: Box::new(err),
-                        }
-                        .raise()
-                    })?;
-                let dirty = worktree_repo.is_dirty().map_err(|err| {
+            if let Some(checkout) = entry.checkout.as_deref().filter(|path| path.is_dir()) {
+                let status_error = |source: Box<dyn std::error::Error + Send + Sync>| {
                     Error::Status {
                         id: entry.id.clone(),
-                        source: Box::new(err),
+                        source,
                     }
                     .raise()
-                })?;
+                };
+                if !entry.condition.is_registered() {
+                    return Err(status_error(Box::new(std::io::Error::other(
+                        "the checkout does not link back to its worktree registration",
+                    ))));
+                }
+                let has_index = entry
+                    .admin_dir
+                    .join("index")
+                    .try_exists()
+                    .map_err(|err| status_error(Box::new(err)))?;
+                let dirty = if has_index {
+                    let worktree_repo = crate::worktree::Proxy::new(self, entry.admin_dir.clone())
+                        .into_repo_with_possibly_inaccessible_worktree()
+                        .map_err(|err| status_error(Box::new(err)))?;
+                    // Restore the walker even if status.showUntrackedFiles disabled it.
+                    // Display preferences must not authorize deleting untracked work.
+                    let dirwalk = worktree_repo
+                        .dirwalk_options()
+                        .map_err(|err| status_error(Box::new(err)))?;
+                    let mut changes = worktree_repo
+                        .status(gix_features::progress::Discard)
+                        .map_err(|err| status_error(Box::new(err)))?
+                        .index_worktree_options_mut(|options| options.dirwalk_options = Some(dirwalk))
+                        .untracked_files(crate::status::UntrackedFiles::Collapsed)
+                        .index_worktree_submodules(crate::status::Submodule::Given {
+                            ignore: crate::submodule::config::Ignore::None,
+                            check_dirty: true,
+                        })
+                        .into_iter(Vec::<BString>::new())
+                        .map_err(|err| status_error(Box::new(err)))?;
+                    // Iterator failures mean unknown cleanliness, never a clean checkout.
+                    changes
+                        .next()
+                        .transpose()
+                        .map_err(|err| status_error(Box::new(err)))?
+                        .is_some()
+                } else {
+                    // A no-checkout registration may be empty, but a missing index is not
+                    // evidence that files subsequently placed in the checkout are disposable.
+                    let mut has_files = false;
+                    for child in std::fs::read_dir(checkout).map_err(|err| status_error(Box::new(err)))? {
+                        let child = child.map_err(|err| status_error(Box::new(err)))?;
+                        if child.file_name() != ".git" {
+                            has_files = true;
+                            break;
+                        }
+                    }
+                    has_files
+                };
                 if dirty {
                     return Err(Error::Dirty { id: entry.id.clone() }.raise());
                 }

@@ -1,5 +1,178 @@
 use gix_ref::bstr;
 
+mod removal_safety {
+    use std::{
+        path::Path,
+        process::{Command, Output},
+    };
+    use gix::repository::worktree_admin::{add, remove};
+
+    fn git(root: &Path, arguments: &[&str]) -> std::io::Result<Output> {
+        Command::new("git")
+            .current_dir(root)
+            .args(["-c", "core.autocrlf=false"])
+            .args(arguments)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CONFIG_COUNT")
+            .output()
+    }
+
+    fn git_ok(root: &Path, arguments: &[&str]) -> crate::Result {
+        let output = git(root, arguments)?;
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    fn fixture(
+        materialize: bool,
+    ) -> gix_testtools::Result<(gix_testtools::tempfile::TempDir, gix::Repository, add::Outcome)> {
+        let temp = gix_testtools::tempfile::TempDir::new()?;
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root)?;
+        git_ok(&root, &["init", "-q"])?;
+        git_ok(&root, &["config", "user.name", "Removal Tests"])?;
+        git_ok(&root, &["config", "user.email", "removal@example.com"])?;
+        std::fs::write(root.join("tracked"), b"committed\n")?;
+        git_ok(&root, &["add", "tracked"])?;
+        git_ok(&root, &["commit", "-q", "-m", "fixture"])?;
+        let repo = gix::open_opts(&root, crate::restricted())?;
+        let added = repo.add_worktree(
+            &temp.path().join("linked"),
+            add::Attachment::DetachedAt(repo.head_id()?.detach()),
+            add::Options::default(),
+        )?;
+        if materialize {
+            git_ok(&added.checkout, &["reset", "--hard", "HEAD"])?;
+        }
+        Ok((temp, repo, added))
+    }
+
+    #[test]
+    fn untracked_files_are_protected_even_when_status_hides_them() -> crate::Result {
+        for hide_untracked in [false, true] {
+            let (_temp, repo, added) = fixture(true)?;
+            std::fs::write(added.checkout.join("untracked"), b"keep me\n")?;
+            if hide_untracked {
+                git_ok(
+                    repo.workdir().expect("main worktree"),
+                    &["config", "status.showUntrackedFiles", "no"],
+                )?;
+            }
+            let baseline = git(
+                repo.workdir().expect("main worktree"),
+                &[
+                    "-c", "status.showUntrackedFiles=all", "worktree", "remove",
+                    added.checkout.to_str().expect("UTF-8 temporary path"),
+                ],
+            )?;
+            assert!(!baseline.status.success(), "Git refuses the same untracked checkout");
+            let error = repo
+                .remove_worktree(added.id.as_ref(), remove::Options::default())
+                .expect_err("untracked data must survive");
+            assert!(
+                matches!(error.into_inner(), remove::Error::Dirty { .. }),
+                "untracked data is a dirty checkout"
+            );
+            assert_eq!(std::fs::read(added.checkout.join("untracked"))?, b"keep me\n");
+            assert!(added.admin_dir.is_dir(), "refusal preserves registration");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_index_does_not_authorize_deleting_files() -> crate::Result {
+        for materialize in [false, true] {
+            let (_temp, repo, added) = fixture(materialize)?;
+            if materialize {
+                std::fs::remove_file(added.admin_dir.join("index"))?;
+            }
+            std::fs::write(added.checkout.join("untracked"), b"keep me\n")?;
+            let error = repo
+                .remove_worktree(added.id.as_ref(), remove::Options::default())
+                .expect_err("absence of an index is not proof of emptiness");
+            assert!(
+                matches!(error.into_inner(), remove::Error::Dirty { .. }),
+                "a nonempty checkout is refused as dirty"
+            );
+            assert_eq!(std::fs::read(added.checkout.join("untracked"))?, b"keep me\n");
+            assert!(added.admin_dir.is_dir());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn staged_and_unstaged_changes_are_protected() -> crate::Result {
+        for staged in [false, true] {
+            let (_temp, repo, added) = fixture(true)?;
+            std::fs::write(added.checkout.join("tracked"), b"modified and retained\n")?;
+            if staged {
+                git_ok(&added.checkout, &["add", "tracked"])?;
+            }
+            let error = repo
+                .remove_worktree(added.id.as_ref(), remove::Options::default())
+                .expect_err("tracked work must survive");
+            assert!(
+                matches!(error.into_inner(), remove::Error::Dirty { .. }),
+                "tracked work is refused as dirty"
+            );
+            assert_eq!(std::fs::read(added.checkout.join("tracked"))?, b"modified and retained\n");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_mismatched_registration_cannot_authorize_removal() -> crate::Result {
+        let (_temp, repo, added) = fixture(true)?;
+        std::fs::write(
+            added.checkout.join(".git"),
+            format!("gitdir: {}\n", repo.git_dir().display()),
+        )?;
+        let error = repo
+            .remove_worktree(added.id.as_ref(), remove::Options::default())
+            .expect_err("foreign checkout evidence must not authorize removal");
+        assert!(matches!(error.into_inner(), remove::Error::Status { .. }));
+        assert_eq!(std::fs::read(added.checkout.join("tracked"))?, b"committed\n");
+        assert!(added.admin_dir.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_index_is_a_status_error_and_preserves_the_checkout() -> crate::Result {
+        let (_temp, repo, added) = fixture(true)?;
+        std::fs::write(added.admin_dir.join("index"), b"invalid index")?;
+        let error = repo
+            .remove_worktree(added.id.as_ref(), remove::Options::default())
+            .expect_err("unknown cleanliness cannot permit removal");
+        assert!(
+            matches!(error.into_inner(), remove::Error::Status { .. }),
+            "index failure remains a status error"
+        );
+        assert_eq!(std::fs::read(added.checkout.join("tracked"))?, b"committed\n");
+        assert!(added.admin_dir.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn clean_and_empty_worktrees_are_removable_and_force_is_explicit() -> crate::Result {
+        for materialize in [false, true] {
+            let (_temp, repo, added) = fixture(materialize)?;
+            let outcome = repo.remove_worktree(added.id.as_ref(), remove::Options::default())?;
+            assert!(outcome.checkout_removed && outcome.registration_removed);
+            assert!(!added.checkout.exists() && !added.admin_dir.exists());
+        }
+        let (_temp, repo, added) = fixture(true)?;
+        std::fs::write(added.checkout.join("untracked"), b"explicitly disposable\n")?;
+        let outcome = repo.remove_worktree(added.id.as_ref(), remove::Options { force: true })?;
+        assert!(outcome.checkout_removed && outcome.registration_removed);
+        Ok(())
+    }
+}
+
 /// The buffer length for SHA1 archives.
 #[cfg(target_pointer_width = "64")]
 #[cfg(feature = "worktree-stream")]

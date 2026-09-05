@@ -80,8 +80,14 @@ impl File {
                 // index files, we choose more safety here just like git does and don't even try to decode the index if the hashes
                 // don't match.
                 // Thanks to `skip_hash`, we can get performance and it's under caller control, at the cost of some safety.
-                let expected =
-                    gix_hash::ObjectId::from_bytes_or_panic(&data[data.len() - object_hash.len_in_bytes()..]);
+                let hash_start = data
+                    .len()
+                    .checked_sub(object_hash.len_in_bytes())
+                    .ok_or(decode::Error::UnexpectedTrailerLength {
+                        expected: object_hash.len_in_bytes(),
+                        actual: data.len(),
+                    })?;
+                let expected = gix_hash::ObjectId::from_bytes_or_panic(&data[hash_start..]);
                 if !expected.is_null() {
                     let _span = gix_features::trace::detail!("gix::open_index::hash_index", path = ?path);
                     let meta = file.metadata()?;
