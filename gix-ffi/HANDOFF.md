@@ -8,6 +8,8 @@ The shallow boundary/location slice is recorded in transaction
 is integrated as `ee8ffcb7`. Configuration compatibility is recorded in transaction
 `d461153e562eea7ec0b754bb`. The annotated/lightweight tag slice is recorded in
 transaction `b1cbb5ba3e7ab5b6b96985a2`, based on managed-boundary commit `e37f298c`.
+Identity/mailmap transaction `12351a13bee70d62d69cda3d` includes tags and the
+SHA-256 object-ID update through target `2627094`.
 The completion goal is full public gix coverage, confirmed by the user.
 Use the checkboxes here for boundary work and the implementation checklist in
 `../Issues.md` for method/domain coverage. Historical prototype counts and examples
@@ -60,16 +62,18 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   operations retaining prior cached settings until a valid refresh. Valid identity
   writes refresh later commits on the same handle.
 - [x] Configured GetAuthor/GetCommitter and committer fallback methods match gix
-  absence/error and per-component precedence. Fallbacks and lazy identity state
+  absence/error and per-component precedence through real Option carriers.
+  Fallbacks and lazy identity state
   remain on the same handle through into_sync; configuration files are unchanged.
 - [x] GixSignature owns raw name/email bytes and keeps constructor, deconstruction
-  and with/init behavior. Commit/note readers and writers preserve those bytes.
+  and with/init behavior. Commit/note/tag readers and writers preserve those bytes.
   ResolveMailmap/TryResolveMailmap use gix's lenient load/resolve behavior, retain
   partial mappings and timestamps, and return owned results.
-- [x] Identity/mailmap transaction `12351a13bee70d62d69cda3d`: 73/73 native tests
-  (`f86b158d719d1a2f2f7f08cbb4e971a1`) and 87/87 managed tests under
-  PatchedCoreRun/corerun.exe (`op_966b253955f7472e`); managed build
-  `op_faca91da79504d7b` passed. These are preflight totals, not a coverage percentage.
+- [x] Identity/mailmap transaction `12351a13bee70d62d69cda3d`: 82/82 native tests
+  including generation (`5740e99bf32c4a7fb8ec68f8c58177aa`) and 97/97 managed tests
+  under PatchedCoreRun/corerun.exe (`op_be1c924455aa4b6f`); managed build
+  `op_0e00eeb679ba4bec` passed after pulling target `2627094`. Includes seven
+  native and five managed identity/mailmap tests and raw tag signature round trips.
 - [ ] Strict/reusable mailmap loading, parsing, merging and entry access.
 - [ ] Full Git signature time domain beyond DateTimeOffset's representable
   timestamps and offsets; the existing managed When contract is preserved.
@@ -91,14 +95,13 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   0.17.1 from registry `local`.
 - [x] Fresh-index status/staging correction integrated at `b3f28217`;
   retained foundation validation: 31/31 native tests and 54/54 managed tests.
-- [x] Expansion validation: 75/75 native tests, operation
-  `cbeca59bb68a65f7ff9bddd905aa2867`; 92/92 managed tests via
-  PatchedCoreRun/corerun.exe, operation `op_349b35f8b2b941a4`; managed build
-  `op_2faa924be8b04d77` succeeded. Includes all 9 native and 6 managed tag tests
-  and the whole-public-surface boundary check against the regenerated bindings.
-  The preceding boundary slice passed 66 native and 86 managed tests;
-  configuration passed 66/82, notes 57/76, shallow 50/71, ignore/local-exclude
-  47/68 and diff/scalar 41/63.
+- [x] Expansion validation: 82/82 native tests including generation, operation
+  `5740e99bf32c4a7fb8ec68f8c58177aa`; 97/97 managed tests via
+  PatchedCoreRun/corerun.exe, operation `op_be1c924455aa4b6f`; managed build
+  `op_0e00eeb679ba4bec` succeeded. Includes identity/mailmap, all tag tests and
+  the whole-public-surface boundary check against the regenerated bindings.
+  The preceding tags slice passed 75/92, boundary 66/86, configuration 66/82,
+  notes 57/76, shallow 50/71, ignore/local-exclude 47/68 and diff/scalar 41/63.
 - [ ] Complete every remaining public gix capability in the `../Issues.md`
   implementation checklist, including additions made in parallel.
 - [ ] Complete the remaining boundary, profile and delivery checks below.
@@ -855,7 +858,8 @@ hand-written managed surface already expresses them idiomatically:
 
 `ffi::Option` already has the generated union projection. Tag creation and reads
 use real optional tagger records, and tag reads use optional signature bytes.
-Their generated cases stay inside the boundary; public `GixSignature?` and
+Configured identities and TryResolveMailmap also use real optional signature
+records. Their generated cases stay inside the boundary; public `GixSignature?` and
 `byte[]?` contracts remain idiomatic managed values. The sentinel shapes above
 are remaining cleanup candidates, with no deferred generator prerequisite.
 Preserve their existing public nullable and overload contracts.
@@ -881,8 +885,8 @@ invariants:
 - generated Result case types remain internal under rule 8 and do not alter any
   public GixSharp signature.
 
-The tag input/output Option paths now exercise this projection through the
-patched managed runtime. Remaining sentinel migrations are tracked separately
+The tag and identity/mailmap Option paths now exercise this projection through
+the patched managed runtime. Remaining sentinel migrations are tracked separately
 above; their unchecked state does not imply that Option support is missing.
 
 ## Open architecture questions - priority order
