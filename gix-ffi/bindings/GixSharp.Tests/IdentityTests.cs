@@ -42,7 +42,7 @@ public sealed class IdentityTests
     }
 
     [Test]
-    public async Task CommitAndNoteSignaturesRoundTripRawBytesAfterRepositoryDisposal()
+    public async Task CommitNoteAndTagSignaturesRoundTripRawBytesAfterRepositoryDisposal()
     {
         using var fixture = new Fixture();
         var repository = fixture.Repository;
@@ -54,6 +54,10 @@ public sealed class IdentityTests
         var commitId = repository.CreateCommitObject("raw identity", tree, [], signature, signature);
         var commit = repository.LookupCommit(commitId.Value);
         var blob = repository.WriteBlob("annotated"u8.ToArray());
+        var tagId = repository.CreateAnnotatedTag("raw-identity", blob, signature, "tag");
+        var tag = repository.ReadTag(tagId);
+        var copiedTagId = repository.CreateAnnotatedTag("copied-identity", blob, tag.Tagger, "tag");
+        var copiedTag = repository.ReadTag(copiedTagId);
         repository.WriteNote(blob, "note", signature);
         var note = repository.ReadNote(blob);
         await Assert.That(repository.RemoveNote(blob, signature)).IsTrue();
@@ -61,6 +65,15 @@ public sealed class IdentityTests
         await Assert.That(commit.Author).IsEqualTo(signature);
         await Assert.That(commit.Committer).IsEqualTo(signature);
         await Assert.That(note.Author).IsEqualTo(signature);
+        await Assert.That(tag.Tagger).IsEqualTo(signature);
+        await Assert.That(copiedTag.Tagger).IsEqualTo(signature);
+        await Assert.That(tag.TaggerNameBytes!.SequenceEqual(signature.NameBytes)).IsTrue();
+        var editedTag = tag with { Tagger = signature with { Email = "changed@example.com" } };
+        await Assert.That(editedTag.TaggerNameBytes!.SequenceEqual(signature.NameBytes)).IsTrue();
+        await Assert.That(editedTag.TaggerEmailBytes!.SequenceEqual("changed@example.com"u8.ToArray())).IsTrue();
+        var constructedTag = new GixTag(tag.Id, tag.TargetId, tag.TargetType, tag.Name, tag.Message, signature);
+        await Assert.That(constructedTag.TaggerNameBytes!.SequenceEqual(signature.NameBytes)).IsTrue();
+        await Assert.That((tag with { Tagger = null }).TaggerNameBytes).IsNull();
         await Assert.That(note.AuthorNameBytes.SequenceEqual(signature.NameBytes)).IsTrue();
         var edited = note with { Author = signature with { Email = "changed@example.com" } };
         await Assert.That(edited.AuthorNameBytes.SequenceEqual(signature.NameBytes)).IsTrue();

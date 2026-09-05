@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gix::bstr::ByteSlice;
 use interoptopus::ffi;
 
-use crate::{GixError, Repo, SignatureRecord};
+use crate::{GixError, Repo, TagSignatureRecord as SignatureRecord};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -45,8 +45,10 @@ fn ok<T>(result: ffi::Result<T, GixError>) -> T {
     }
 }
 
+fn author(repo: &mut Repo) -> Option<SignatureRecord> { ok(repo.get_author()).into_option() }
+fn committer(repo: &mut Repo) -> Option<SignatureRecord> { ok(repo.get_committer()).into_option() }
+
 fn assert_signature(record: &SignatureRecord, name: &[u8], email: &[u8]) {
-    assert!(record.is_present, "a complete signature is present");
     assert_eq!(record.name.clone().into_vec(), name, "name bytes remain exact");
     assert_eq!(record.email.clone().into_vec(), email, "email bytes remain exact");
     assert_eq!((record.time_seconds, record.time_offset_seconds), (1_700_000_000, 19_800));
@@ -58,17 +60,17 @@ fn fallback_is_owned_retained_in_the_session_and_never_written_to_disk() {
         let fixture = Fixture::new(bare);
         let original = std::fs::read(fixture.config()).expect("read original config");
         let mut repo = fixture.open(&[]);
-        assert!(!ok(repo.get_author()).is_present);
-        assert!(!ok(repo.get_committer()).is_present);
+        assert!(author(&mut repo).is_none());
+        assert!(committer(&mut repo).is_none());
         let name = b"raw-\xff-name";
         let email = b"raw-\xfe@example.com";
         let fallback = ok(repo.get_committer_or_set_fallback(slice(name), slice(email)));
         assert_signature(&fallback, name, email);
-        assert_signature(&ok(repo.get_committer()), name, email);
+        assert_signature(&committer(&mut repo).expect("complete committer"), name, email);
         assert_signature(&ok(repo.get_committer_or_set_generic_fallback()), name, email);
-        assert!(!ok(repo.get_author()).is_present, "committer fallback does not configure author");
+        assert!(author(&mut repo).is_none(), "committer fallback does not configure author");
         assert_eq!(std::fs::read(fixture.config()).expect("read config"), original);
-        assert!(!ok(fixture.open(&[]).get_committer()).is_present, "a new handle has no session fallback");
+        assert!(committer(&mut fixture.open(&[])).is_none(), "a new handle has no session fallback");
         drop(repo);
         assert_signature(&fallback, name, email);
     }
@@ -78,10 +80,10 @@ fn fallback_is_owned_retained_in_the_session_and_never_written_to_disk() {
 fn partial_identities_keep_each_configured_component_and_generic_fallback_matches_core() {
     let fixture = Fixture::new(false);
     let mut named = fixture.open(&["user.name=Configured Name"]);
-    assert!(!ok(named.get_committer()).is_present);
+    assert!(committer(&mut named).is_none());
     assert_signature(&ok(named.get_committer_or_set_fallback(slice(b"Fallback"), slice(b"fallback@example.com"))),
         b"Configured Name", b"fallback@example.com");
-    assert_signature(&ok(named.get_committer()), b"Configured Name", b"fallback@example.com");
+    assert_signature(&committer(&mut named).expect("complete committer"), b"Configured Name", b"fallback@example.com");
     let mut emailed = fixture.open(&["committer.email=configured@example.com"]);
     assert_signature(&ok(emailed.get_committer_or_set_generic_fallback()),
         b"no name configured", b"configured@example.com");
@@ -97,14 +99,14 @@ fn configured_roles_win_and_are_cached_without_installing_unused_fallbacks() {
         "user.name=User", "user.email=user@example.com",
         "author.name=Author", "committer.email=committer@example.com",
     ]);
-    assert_signature(&ok(repo.get_author()), b"Author", b"user@example.com");
-    assert_signature(&ok(repo.get_committer()), b"User", b"committer@example.com");
+    assert_signature(&author(&mut repo).expect("complete author"), b"Author", b"user@example.com");
+    assert_signature(&committer(&mut repo).expect("complete committer"), b"User", b"committer@example.com");
     assert_signature(&ok(repo.get_committer_or_set_fallback(slice(b"unused"), slice(b"unused@example.com"))),
         b"User", b"committer@example.com");
     assert!(repo.inner.to_thread_local().config_snapshot().string("gitoxide.committer.nameFallback").is_none(),
         "a resolved committer must not install fallback configuration");
     let mut present_empty = fixture.open(&["user.name=", "user.email="]);
-    let identity = ok(present_empty.get_committer());
+    let identity = committer(&mut present_empty).expect("complete committer");
     assert_signature(&identity, b"", b"");
     assert_signature(&ok(present_empty.get_committer_or_set_generic_fallback()), b"", b"");
 }
@@ -119,7 +121,7 @@ fn configured_result_errors_remain_errors_instead_of_missing_identities() {
     };
     assert!(matches!(super::configured(Some(Err(error))), Err(GixError::Config(_))),
         "Some(Err) is never mapped to absent identity or fallback");
-    assert!(!super::configured(None).expect("absence is not an error").is_present);
+    assert!(super::configured(None).expect("absence is not an error").is_none());
 }
 
 #[test]
@@ -128,8 +130,7 @@ fn malformed_configured_dates_keep_the_current_gix_fallback_behavior() {
     let mut repo = fixture.open(&[
         "user.name=User", "user.email=user@example.com", "gitoxide.commit.committerDate=invalid",
     ]);
-    let identity = ok(repo.get_committer());
-    assert!(identity.is_present, "the current gix date parser falls back to now");
+    let identity = committer(&mut repo).expect("complete committer");
     let fallback = ok(repo.get_committer_or_set_generic_fallback());
     assert_eq!(fallback.name.clone().into_vec(), b"User");
     assert_eq!(fallback.time_seconds, identity.time_seconds, "lazy persona state survives the FFI call");
@@ -138,6 +139,7 @@ fn malformed_configured_dates_keep_the_current_gix_fallback_behavior() {
 fn resolve(repo: &Repo, name: &[u8], email: &[u8], only_mapped: bool) -> SignatureRecord {
     if only_mapped {
         repo.try_resolve_mailmap(slice(name), slice(email), 1_700_000_000, 19_800)
+            .into_option().expect("a mailmap entry applies")
     } else {
         repo.resolve_mailmap(slice(name), slice(email), 1_700_000_000, 19_800)
     }
@@ -161,13 +163,13 @@ fn mailmap_preserves_raw_bytes_time_and_lenient_partial_results() {
     assert_signature(&mapped, b"Mapped-\xff", b"mapped-\xfe@example.com");
     assert_signature(&resolve(&repo, b"Original-\xfd", b"old@example.com", false),
         b"Mapped-\xff", b"mapped-\xfe@example.com");
-    assert!(!resolve(&repo, b"Unknown", b"unknown@example.com", true).is_present);
+    assert!(repo.try_resolve_mailmap(slice(b"Unknown"), slice(b"unknown@example.com"), 1_700_000_000, 19_800).into_option().is_none());
     assert_signature(&resolve(&repo, b"Unknown", b"unknown@example.com", false), b"Unknown", b"unknown@example.com");
     assert_eq!(git_check_mailmap(&fixture.root, "Old <plain-old@example.com>"), b"Plain <plain@example.com>");
     // Mailmap reads must not discard a separately installed in-memory identity fallback.
     ok(repo.get_committer_or_set_fallback(slice(b"Fallback"), slice(b"fallback@example.com")));
     let _ = resolve(&repo, b"Unknown", b"unknown@example.com", false);
-    assert_signature(&ok(repo.get_committer()), b"Fallback", b"fallback@example.com");
+    assert_signature(&committer(&mut repo).expect("complete committer"), b"Fallback", b"fallback@example.com");
     drop(repo);
     assert_signature(&mapped, b"Mapped-\xff", b"mapped-\xfe@example.com");
 }

@@ -12,8 +12,8 @@ public sealed record GixTag(
     private readonly GixSignature? _tagger = Tagger;
     private readonly string _nameBytes = Encode(Name);
     private readonly string _messageBytes = Encode(Message);
-    private readonly string? _taggerNameBytes = Tagger is null ? null : Encode(Tagger.Name);
-    private readonly string? _taggerEmailBytes = Tagger is null ? null : Encode(Tagger.Email);
+    private readonly string? _taggerNameBytes = Tagger is null ? null : Convert.ToBase64String(Tagger.NameBytes);
+    private readonly string? _taggerEmailBytes = Tagger is null ? null : Convert.ToBase64String(Tagger.EmailBytes);
     private readonly string? _signatureBytes;
 
     public string Name
@@ -34,8 +34,8 @@ public sealed record GixTag(
         init
         {
             _tagger = value;
-            _taggerNameBytes = value is null ? null : Encode(value.Name);
-            _taggerEmailBytes = value is null ? null : Encode(value.Email);
+            _taggerNameBytes = value is null ? null : Convert.ToBase64String(value.NameBytes);
+            _taggerEmailBytes = value is null ? null : Convert.ToBase64String(value.EmailBytes);
         }
     }
 

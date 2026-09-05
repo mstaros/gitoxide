@@ -84,15 +84,18 @@ public sealed partial class GixRepository
             using var email = signature.EmailBytes.Slice();
             using var mapped = repo.TryResolveMailmap(name, email,
                 signature.When.ToUnixTimeSeconds(), SignatureOffsetSeconds(signature));
-            return mapped.is_present
-                ? GixSignature.FromBytes(mapped.name.ToArray(), mapped.email.ToArray(), signature.When)
-                : null;
+            var result = ReadOptionalSignature(mapped);
+            return result is null ? null : result with { When = signature.When };
         });
         return resolved is not null;
     }
 
-    private static GixSignature? ReadOptionalSignature(SignatureRecord signature) =>
-        signature.is_present
-            ? ReadSignature(signature.name, signature.email, signature.time_seconds, signature.time_offset_seconds)
-            : null;
+    private static GixSignature? ReadOptionalSignature(OptionTagSignatureRecord signature) =>
+        signature switch
+        {
+            OptionTagSignatureRecord.SomeCase { Value: var value } =>
+                ReadSignature(value.name, value.email, value.time_seconds, value.time_offset_seconds),
+            OptionTagSignatureRecord.NoneCase => null,
+            null => throw new InvalidOperationException("gix returned an empty identity option."),
+        };
 }

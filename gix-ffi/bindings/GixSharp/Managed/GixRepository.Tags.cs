@@ -23,8 +23,8 @@ public sealed partial class GixRepository
             ArgumentException.ThrowIfNullOrWhiteSpace(tagger.Email);
         }
         return CreateAnnotatedTagCore(name, targetId, message,
-            tagger is null ? null : EncodePath(tagger.Name),
-            tagger is null ? null : EncodePath(tagger.Email), tagger?.When ?? default, force);
+            tagger?.NameBytes,
+            tagger?.EmailBytes, tagger?.When ?? default, force);
     }
 
     /// <summary>Creates an annotated tag with exact tagger identity bytes and an explicit timestamp.</summary>
