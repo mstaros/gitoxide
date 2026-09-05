@@ -392,6 +392,8 @@ Repository core and discovery.
 
 Implemented the complete mapped objects and commit-graph surface in the Rust FFI and idiomatic managed layer. Added object IDs/types/metadata, signatures, commits, sort flags, revision/tag peeling, history with exclusion and limits, tree lookup, index-backed and explicit commit creation, ordered parents, independent author/committer defaults, ref updates, allow-empty behavior, and ancestry (including equal IDs).
 
+- [x] Accept full SHA-1 (40 hexadecimal characters) and SHA-256 (64) in the existing `GixObjectId`, preserving lowercase normalization and value semantics. Reject abbreviations, neighboring invalid lengths, nonhex/Unicode characters and null/whitespace input. Transaction `875f65e6b864ece69548835a` first reproduced the SHA-256 rejection, then passed 92/92 patched-required managed tests (`op_04ec495030de453f`) against tags/boundary target `2e717118`. Native SHA-256 engine/profile delivery remains tracked separately.
+
 Validation evidence before integration:
 
 - Rust: the full `gix-ffi` test suite passes, including 5 dedicated objects/commit-graph tests.
