@@ -1,5 +1,137 @@
 use gix_ref::bstr;
 
+mod registration_safety {
+    use std::{
+        collections::BTreeSet,
+        path::{Path, PathBuf},
+        sync::Barrier,
+    };
+
+    use gix::repository::worktree_admin::add;
+
+    use super::removal_safety::{fixture, git, git_ok};
+
+    fn competing_adds(
+        repository: &Path,
+        paths: &[PathBuf],
+        commit_id: gix::ObjectId,
+    ) -> Vec<Result<add::Outcome, gix::error::Exn<add::Error>>> {
+        let barrier = Barrier::new(paths.len());
+        std::thread::scope(|scope| {
+            let handles = paths
+                .iter()
+                .map(|path| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let repo =
+                            gix::open_opts(repository, crate::restricted()).expect("open shared test repository");
+                        barrier.wait();
+                        repo.add_worktree(path, add::Attachment::DetachedAt(commit_id), add::Options::default())
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("registration thread completed"))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn a_name_collision_omitted_by_listing_is_reserved_by_someone_else() -> crate::Result {
+        let (temp, repo, _existing) = fixture(false)?;
+        let occupied = repo.common_dir().join("worktrees").join("collision");
+        std::fs::write(&occupied, b"belongs to someone else\n")?;
+        let added = repo.add_worktree(
+            &temp.path().join("collision"),
+            add::Attachment::DetachedAt(repo.head_id()?.detach()),
+            add::Options::default(),
+        )?;
+        assert_eq!(added.id, "collision1", "exclusive mkdir, not listing, decides availability");
+        assert_eq!(std::fs::read(occupied)?, b"belongs to someone else\n");
+        git_ok(&added.checkout, &["rev-parse", "--git-dir"])?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_same_basename_registrations_keep_distinct_owners() -> crate::Result {
+        let (temp, repo, _existing) = fixture(false)?;
+        let paths = (0..16)
+            .map(|n| temp.path().join(format!("parent-{n}")).join("shared"))
+            .collect::<Vec<_>>();
+        let results = competing_adds(repo.workdir().expect("main worktree"), &paths, repo.head_id()?.detach());
+        let mut ids = BTreeSet::new();
+        for result in results {
+            let added = result?;
+            assert!(ids.insert(added.id), "each successful registration owns a distinct administrative directory");
+            let actual = git(&added.checkout, &["rev-parse", "--absolute-git-dir"])?;
+            assert!(actual.status.success(), "Git opens every independently registered checkout");
+            let actual = PathBuf::from(String::from_utf8(actual.stdout)?.trim());
+            assert_eq!(std::fs::canonicalize(actual)?, std::fs::canonicalize(&added.admin_dir)?);
+        }
+        assert_eq!(ids.len(), paths.len());
+        Ok(())
+    }
+
+    #[test]
+    fn competing_for_one_checkout_preserves_the_winner() -> crate::Result {
+        for already_exists in [false, true] {
+            let (temp, repo, _existing) = fixture(false)?;
+            let checkout = temp.path().join("contended");
+            if already_exists {
+                std::fs::create_dir(&checkout)?;
+            }
+            let paths = vec![checkout.clone(); 16];
+            let results = competing_adds(repo.workdir().expect("main worktree"), &paths, repo.head_id()?.detach());
+            let mut winners = Vec::new();
+            for result in results {
+                match result {
+                    Ok(added) => winners.push(added),
+                    Err(error) => match error.into_inner() {
+                        add::Error::AlreadyRegistered { .. } | add::Error::DirectoryNotEmpty { .. } => {}
+                        add::Error::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        error => panic!("unexpected registration failure: {error}"),
+                    },
+                }
+            }
+            assert_eq!(winners.len(), 1, "exactly one call owns the checkout");
+            let winner = &winners[0];
+            assert!(winner.admin_dir.join("HEAD").is_file(), "failed contenders preserve the winner's registration");
+            git_ok(&checkout, &["rev-parse", "--git-dir"])?;
+            assert_eq!(repo.worktree_admin_entries()?.len(), 2, "failed contenders leave no registration behind");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_head_write_cleans_only_the_paths_this_call_created() -> crate::Result {
+        for already_exists in [false, true] {
+            let (temp, repo, existing) = fixture(false)?;
+            git_ok(repo.workdir().expect("main worktree"), &["config", "--unset", "user.name"])?;
+            let repo = gix::open_opts(repo.workdir().expect("main worktree"), gix::open::Options::isolated())?;
+            assert!(repo.committer().is_none(), "the reflog has no committer identity");
+            let checkout = temp.path().join("failed");
+            if already_exists {
+                std::fs::create_dir(&checkout)?;
+            }
+            let error = repo
+                .add_worktree(
+                    &checkout,
+                    add::Attachment::DetachedAt(repo.head_id()?.detach()),
+                    add::Options::default(),
+                )
+                .expect_err("missing committer identity fails when writing the HEAD reflog");
+            assert!(matches!(error.into_inner(), add::Error::WriteHead { .. }));
+            assert_eq!(checkout.is_dir(), already_exists, "a caller-owned empty directory survives rollback");
+            assert!(!checkout.join(".git").exists());
+            let entries = repo.worktree_admin_entries()?;
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].id, existing.id, "an unrelated registration survives rollback");
+        }
+        Ok(())
+    }
+}
+
 mod removal_safety {
     use std::{
         path::Path,
@@ -7,7 +139,7 @@ mod removal_safety {
     };
     use gix::repository::worktree_admin::{add, remove};
 
-    fn git(root: &Path, arguments: &[&str]) -> std::io::Result<Output> {
+    pub(super) fn git(root: &Path, arguments: &[&str]) -> std::io::Result<Output> {
         Command::new("git")
             .current_dir(root)
             .args(["-c", "core.autocrlf=false"])
@@ -18,7 +150,7 @@ mod removal_safety {
             .output()
     }
 
-    fn git_ok(root: &Path, arguments: &[&str]) -> crate::Result {
+    pub(super) fn git_ok(root: &Path, arguments: &[&str]) -> crate::Result {
         let output = git(root, arguments)?;
         assert!(
             output.status.success(),
@@ -28,7 +160,7 @@ mod removal_safety {
         Ok(())
     }
 
-    fn fixture(
+    pub(super) fn fixture(
         materialize: bool,
     ) -> gix_testtools::Result<(gix_testtools::tempfile::TempDir, gix::Repository, add::Outcome)> {
         let temp = gix_testtools::tempfile::TempDir::new()?;

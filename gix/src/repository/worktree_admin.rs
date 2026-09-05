@@ -534,14 +534,10 @@ impl crate::Repository {
     /// use by another worktree — including one held by an in-progress rebase or bisect — is
     /// refused, matching Git.
     ///
-    /// On any failure after the first directory is created, everything created here is removed
-    /// again, so a failed call leaves no registration behind.
-    ///
-    /// ### Note
-    ///
-    /// Two concurrent calls racing for the same identifier can both proceed: the identifier is
-    /// derived to avoid collisions, but that derivation is not itself atomic. Git avoids this by
-    /// looping on `mkdir` until it no longer reports `EEXIST`.
+    /// Administrative directories and the checkout's `.git` file are reserved exclusively.
+    /// Identifier collisions are retried with a numeric suffix, including incomplete registrations.
+    /// On failure, cleanup removes only paths reserved by this call. A newly created checkout is
+    /// removed only if it is still empty, preserving files concurrently placed there by others.
     pub fn add_worktree(
         &self,
         path: &std::path::Path,
@@ -615,21 +611,42 @@ impl crate::Repository {
             }
         }
 
-        let id = self.unused_worktree_id(&checkout, &entries);
-        let admin_dir = self
-            .common_dir()
-            .join("worktrees")
-            .join(gix_path::from_bstr(id.as_bstr()).as_ref());
-
-        // Everything below can fail partway; undo it rather than leaving a broken registration.
-        let result = self.write_worktree_registration(&admin_dir, &checkout, &attach, options.lock.as_ref());
-        if result.is_err() {
-            std::fs::remove_dir_all(&admin_dir).ok();
+        let (id, admin_dir) = self.reserve_worktree_id(&checkout, &entries)?;
+        let dot_git_path = checkout.join(".git");
+        let mut checkout_created = false;
+        let mut dot_git_created = false;
+        let io = |path: &std::path::Path| {
+            let path = path.to_owned();
+            move |source: std::io::Error| Error::Io { path, source }.raise()
+        };
+        let result = (|| {
             if !checkout_existed {
-                std::fs::remove_dir_all(&checkout).ok();
-            } else {
-                std::fs::remove_file(checkout.join(".git")).ok();
+                if let Some(parent) = checkout.parent() {
+                    std::fs::create_dir_all(parent).map_err(io(parent))?;
+                }
+                std::fs::create_dir(&checkout).map_err(io(&checkout))?;
+                checkout_created = true;
             }
+            // Reserve even a caller-provided empty checkout without overwriting another
+            // registration which arrived after the preflight inspection.
+            let mut dot_git = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&dot_git_path)
+                .map_err(io(&dot_git_path))?;
+            dot_git_created = true;
+            self.write_worktree_registration(&admin_dir, &checkout, &attach, options.lock.as_ref(), &mut dot_git)
+        })();
+        if result.is_err() {
+            if dot_git_created {
+                std::fs::remove_file(&dot_git_path).ok();
+            }
+            if checkout_created {
+                // Leave any files concurrently added by someone else intact.
+                std::fs::remove_dir(&checkout).ok();
+            }
+            // The exclusive mkdir above, not a directory listing, established ownership.
+            std::fs::remove_dir_all(&admin_dir).ok();
         }
         result?;
 
@@ -1007,15 +1024,14 @@ impl crate::Repository {
         checkout: &std::path::Path,
         attach: &add::Attachment,
         lock: Option<&Option<BString>>,
+        dot_git_file: &mut std::fs::File,
     ) -> Result<(), Exn<add::Error>> {
         use add::Error;
+        use std::io::Write;
         let io = |path: &std::path::Path| {
             let path = path.to_owned();
             move |source: std::io::Error| Error::Io { path, source }.raise()
         };
-
-        std::fs::create_dir_all(admin_dir).map_err(io(admin_dir))?;
-        std::fs::create_dir_all(checkout).map_err(io(checkout))?;
 
         let dot_git = checkout.join(".git");
         write_gitdir_pointer(admin_dir, checkout).map_err(io(&admin_dir.join("gitdir")))?;
@@ -1034,7 +1050,10 @@ impl crate::Repository {
         }
 
         // The checkout points back at us, completing the two-way link.
-        write_dot_git_back_pointer(checkout, admin_dir).map_err(io(&dot_git))?;
+        let mut contents = BString::from("gitdir: ");
+        contents.extend_from_slice(&gix_path::to_unix_separators_on_windows(gix_path::into_bstr(admin_dir)));
+        contents.push(b'\n');
+        dot_git_file.write_all(&contents).map_err(io(&dot_git))?;
         Ok(())
     }
 
@@ -1122,29 +1141,49 @@ impl crate::Repository {
         Ok(())
     }
 
-    /// Derive an administrative identifier from `checkout` which no existing entry uses.
+    /// Reserve an administrative directory derived from the checkout's final component.
     ///
-    /// Git names the entry after the checkout's final component and disambiguates with a counter.
-    /// Comparison is case-insensitive so that two worktrees differing only in case cannot collide
-    /// on a case-insensitive filesystem.
-    fn unused_worktree_id(&self, checkout: &std::path::Path, entries: &[Entry]) -> BString {
+    /// As in Git, only a successful exclusive mkdir establishes ownership. A collided entry,
+    /// even an incomplete one, belongs to someone else; pruning is a separate operation.
+    fn reserve_worktree_id(
+        &self,
+        checkout: &std::path::Path,
+        entries: &[Entry],
+    ) -> Result<(BString, PathBuf), Exn<add::Error>> {
         let base: BString = checkout
             .file_name()
             .map(|name| gix_path::into_bstr(std::path::Path::new(name)).into_owned())
             .unwrap_or_else(|| "worktree".into());
-        let taken = |candidate: &BString| {
-            entries
+        let parent = self.common_dir().join("worktrees");
+        std::fs::create_dir_all(&parent).map_err(|source| {
+            add::Error::Io {
+                path: parent.clone(),
+                source,
+            }
+            .raise()
+        })?;
+        for suffix in 0u32.. {
+            let mut id = base.clone();
+            if suffix != 0 {
+                id.extend_from_slice(format!("{suffix}").as_bytes());
+            }
+            if entries
                 .iter()
-                .any(|entry| entry.id.to_ascii_lowercase() == candidate.to_ascii_lowercase())
-        };
-        if !taken(&base) {
-            return base;
-        }
-        for suffix in 1u32.. {
-            let mut candidate = base.clone();
-            candidate.extend_from_slice(format!("{suffix}").as_bytes());
-            if !taken(&candidate) {
-                return candidate;
+                .any(|entry| entry.id.to_ascii_lowercase() == id.to_ascii_lowercase())
+            {
+                continue;
+            }
+            let admin_dir = parent.join(gix_path::from_bstr(id.as_bstr()).as_ref());
+            match std::fs::create_dir(&admin_dir) {
+                Ok(()) => return Ok((id, admin_dir)),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(source) => {
+                    return Err(add::Error::Io {
+                        path: admin_dir,
+                        source,
+                    }
+                    .raise());
+                }
             }
         }
         unreachable!("the counter is exhausted only after 4 billion identically named worktrees")
