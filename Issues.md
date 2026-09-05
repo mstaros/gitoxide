@@ -271,7 +271,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [x] `Repository::write_blob` → `GixRepository.WriteBlob(byte[])`; exact bytes, empty blobs, normal/bare repositories and managed disposal tested.
 - [ ] Blob writes from a stream — `repository/object.rs::write_blob_stream`.
 - [ ] Tree entry lookup, traversal and editing — `object/tree/{mod,traverse,editor}.rs`.
-- [ ] Annotated tag creation, reading and peeling — `repository/reference.rs`, `object/tag.rs`.
+- [x] Annotated and lightweight tag creation, owned reads and peeling — `repository/reference.rs`, `object/tag.rs`, `object/peel.rs` → CreateAnnotatedTag, CreateTagReference, ReadTag and PeelTags; transaction `b1cbb5ba3e7ab5b6b96985a2`. Exact names/messages/tagger bytes and extracted signature armor are owned; optional taggers, nested tags/all target kinds, concurrent creation, force/ref locks, malformed objects and Windows path preflight are compared with Git. Signature extraction does not verify authenticity.
 - [ ] General revision resolution, merge-base variants and revision-walk controls — `repository/revision.rs`, `revision/walk.rs`.
 - [ ] Commit description and signature access/signing/verification — `object/commit.rs`, `commit/mod.rs`.
 - [ ] Full status change details, rewrites/copies, statistics, submodules, caller-selected head/index, iteration, cancellation and writeback outcomes — `status/{platform,index_worktree}.rs`, `status/iter/types.rs`.
@@ -283,6 +283,10 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Submodule configuration, IDs, paths, state/status and repository access — `repository/submodule.rs`, `submodule/mod.rs`.
 - [ ] Blame ranges and options — `repository/blame.rs`.
 - [ ] Mailmap and configured author/committer identity — `repository/{mailmap,identity}.rs`.
+- [x] Configured identity methods: GetAuthor/GetCommitter use real Option carriers and return null only for gix absence; GetCommitterOrSetFallback (string/byte overloads) and GetCommitterOrSetGenericFallback retain session state without disk writes. Partial name/email precedence and present-empty identities follow gix.
+- [x] Owned GixSignature.NameBytes/EmailBytes and FromBytes preserve constructor/deconstruction/with/init behavior and raw commit/note/tag identities. ResolveMailmap/TryResolveMailmap follow lenient gix loading, preserve partial mappings, raw bytes and input timestamps; Try reports whether a mapping applies. Transaction `12351a13bee70d62d69cda3d`: 82/82 native tests including generation (`5740e99bf32c4a7fb8ec68f8c58177aa`) and 97/97 patched managed tests (`op_be1c924455aa4b6f`), build `op_0e00eeb679ba4bec`. The managed proof includes tags, the managed boundary and SHA-256 object-ID commit `2627094`.
+- [ ] Strict mailmap loading and reusable snapshot/parse/merge/entry operations — gix open_mailmap_into and the public mailmap snapshot surface remain uncovered.
+- [ ] Full Git signature time domain — the compatible GixSignature.When remains DateTimeOffset; gix i64 seconds and offsets outside .NET's range or with second precision are not yet representable.
 - [ ] Remote mutation, refspecs, URL resolution and defaults — `remote/{access,build,save}.rs`, `repository/config/remote.rs`.
 - [ ] Clone preparation, fetch, ref mapping and checkout with progress/cancellation/credentials — `lib.rs`, `clone/`, `remote/connect.rs`, `remote/connection/`.
 - [ ] Full worktree administration, including remove/lock/unlock/repair/move — `repository/worktree_admin.rs`.
@@ -307,7 +311,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Complete CSharpMpc consumer migration and its full tests — issue `2c6f1a0f`.
 - [ ] Full gix coverage: every public capability accounted for, implemented through the managed boundary, validated, integrated and checked above.
 
-Latest validated expansion on 2026-09-05: configuration transaction `d461153e562eea7ec0b754bb`, gix-ffi 66/66 native tests (`44573d676596122f55e49dc04bd22592`) and GixSharp 82/82 managed tests. Managed build `op_d044f50e2bc94ac4` and patched-runtime run `op_d83d8f99218340ad` succeeded. Notes integrated as `ee8ffcb7` with 57 native and 76 managed tests; shallow `24b9b9e9` passed 50 native and 71 managed; ignore/local-exclude `c051d784` passed 47 native and 68 managed; diff/scalar `22c1da14` passed 41 native and 63 managed. These totals are validation evidence, not a coverage percentage.
+Latest validated expansion on 2026-09-05: identity/mailmap transaction `12351a13bee70d62d69cda3d` passed 82/82 gix-ffi native tests including generation (`5740e99bf32c4a7fb8ec68f8c58177aa`) and 97/97 GixSharp managed tests via PatchedCoreRun/corerun.exe (`op_be1c924455aa4b6f`); managed build `op_0e00eeb679ba4bec` succeeded after pulling target `2627094`. This includes seven native and five managed identity/mailmap tests, raw commit/note/tag signature round trips, real identity Option carriers and the whole-public-surface boundary checks. The preceding tags slice passed 75/92, boundary 66/86, configuration 66/82, notes 57/76, shallow 50/71, ignore/local-exclude 47/68 and diff/scalar 41/63. These totals are validation evidence, not a coverage percentage.
 
 ## Sequencing evidence
 
@@ -387,6 +391,8 @@ Repository core and discovery.
 ### Resolution
 
 Implemented the complete mapped objects and commit-graph surface in the Rust FFI and idiomatic managed layer. Added object IDs/types/metadata, signatures, commits, sort flags, revision/tag peeling, history with exclusion and limits, tree lookup, index-backed and explicit commit creation, ordered parents, independent author/committer defaults, ref updates, allow-empty behavior, and ancestry (including equal IDs).
+
+- [x] Accept full SHA-1 (40 hexadecimal characters) and SHA-256 (64) in the existing `GixObjectId`, preserving lowercase normalization and value semantics. Reject abbreviations, neighboring invalid lengths, nonhex/Unicode characters and null/whitespace input. Transaction `875f65e6b864ece69548835a` first reproduced the SHA-256 rejection, then passed 92/92 patched-required managed tests (`op_04ec495030de453f`) against tags/boundary target `2e717118`. Native SHA-256 engine/profile delivery remains tracked separately.
 
 Validation evidence before integration:
 

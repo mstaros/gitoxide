@@ -85,8 +85,8 @@ public sealed partial class GixRepository
             using var nativeId = objectId.Value.Utf8();
             using var nativeRef = notesRef.Slice();
             using var nativeMessage = message.Slice();
-            using var nativeName = EncodePath(signature.Name).Slice();
-            using var nativeEmail = EncodePath(signature.Email).Slice();
+            using var nativeName = signature.NameBytes.Slice();
+            using var nativeEmail = signature.EmailBytes.Slice();
             using var id = repo.WriteNote(nativeId, nativeRef, nativeMessage,
                 nativeName, nativeEmail, signature.When.ToUnixTimeSeconds(), SignatureOffsetSeconds(signature),
                 nativeName, nativeEmail, signature.When.ToUnixTimeSeconds(), SignatureOffsetSeconds(signature), overwrite);
@@ -135,8 +135,8 @@ public sealed partial class GixRepository
         {
             using var nativeId = objectId.Value.Utf8();
             using var nativeRef = notesRef.Slice();
-            using var nativeName = EncodePath(signature.Name).Slice();
-            using var nativeEmail = EncodePath(signature.Email).Slice();
+            using var nativeName = signature.NameBytes.Slice();
+            using var nativeEmail = signature.EmailBytes.Slice();
             return repo.RemoveNote(nativeId, nativeRef,
                 nativeName, nativeEmail, signature.When.ToUnixTimeSeconds(), SignatureOffsetSeconds(signature),
                 nativeName, nativeEmail, signature.When.ToUnixTimeSeconds(), SignatureOffsetSeconds(signature));

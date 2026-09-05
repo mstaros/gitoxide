@@ -6,7 +6,10 @@ integrated as `22c1da14`, followed by ignore/local-exclude at `c051d784`.
 The shallow boundary/location slice is recorded in transaction
 `617a0c2ea46d9ae649f97241` and integrated as `24b9b9e9`. Notes compatibility
 is integrated as `ee8ffcb7`. Configuration compatibility is recorded in transaction
-`d461153e562eea7ec0b754bb`.
+`d461153e562eea7ec0b754bb`. The annotated/lightweight tag slice is recorded in
+transaction `b1cbb5ba3e7ab5b6b96985a2`, based on managed-boundary commit `e37f298c`.
+Identity/mailmap transaction `12351a13bee70d62d69cda3d` includes tags and the
+SHA-256 object-ID update through target `2627094`.
 The completion goal is full public gix coverage, confirmed by the user.
 Use the checkboxes here for boundary work and the implementation checklist in
 `../Issues.md` for method/domain coverage. Historical prototype counts and examples
@@ -58,6 +61,28 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   successful persistence remains successful if typed reopening fails, with other
   operations retaining prior cached settings until a valid refresh. Valid identity
   writes refresh later commits on the same handle.
+- [x] Configured GetAuthor/GetCommitter and committer fallback methods match gix
+  absence/error and per-component precedence through real Option carriers.
+  Fallbacks and lazy identity state
+  remain on the same handle through into_sync; configuration files are unchanged.
+- [x] GixSignature owns raw name/email bytes and keeps constructor, deconstruction
+  and with/init behavior. Commit/note/tag readers and writers preserve those bytes.
+  ResolveMailmap/TryResolveMailmap use gix's lenient load/resolve behavior, retain
+  partial mappings and timestamps, and return owned results.
+- [x] Identity/mailmap transaction `12351a13bee70d62d69cda3d`: 82/82 native tests
+  including generation (`5740e99bf32c4a7fb8ec68f8c58177aa`) and 97/97 managed tests
+  under PatchedCoreRun/corerun.exe (`op_be1c924455aa4b6f`); managed build
+  `op_0e00eeb679ba4bec` passed after pulling target `2627094`. Includes seven
+  native and five managed identity/mailmap tests and raw tag signature round trips.
+- [ ] Strict/reusable mailmap loading, parsing, merging and entry access.
+- [ ] Full Git signature time domain beyond DateTimeOffset's representable
+  timestamps and offsets; the existing managed When contract is preserved.
+- [x] Annotated/lightweight tags: CreateAnnotatedTag, CreateTagReference,
+  ReadTag and PeelTags. GixTag owns exact name/message/tagger bytes and extracted
+  signature armor; optional taggers use real Option carriers. Tests cover Git
+  object equality, all target kinds, nested peeling, concurrent create, force,
+  foreign locks, malformed/dangling tags and Windows path validation before
+  object writes. Signature extraction does not verify authenticity.
 - [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
 - [x] GetShallowCommits, ShallowFilePath and raw-byte ShallowFile. Owned snapshots
   read through `gix-shallow` directly, avoiding mtime-only cache staleness; empty,
@@ -70,14 +95,13 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   0.17.1 from registry `local`.
 - [x] Fresh-index status/staging correction integrated at `b3f28217`;
   retained foundation validation: 31/31 native tests and 54/54 managed tests.
-- [x] Expansion validation: 66/66 native tests, operation
-  `44573d676596122f55e49dc04bd22592`; 82/82 managed tests via
-  PatchedCoreRun/corerun.exe, operation `op_d83d8f99218340ad`; managed build
-  `op_d044f50e2bc94ac4` succeeded. Includes, private git-dir conditions,
-  malformed typed-value repair and process cwd changes are covered. Preceding
-  notes passed 57 native and 76 managed tests; shallow passed 50 native and
-  71 managed; ignore passed 47 native and 68 managed; diff/scalar passed
-  41 native and 63 managed.
+- [x] Expansion validation: 82/82 native tests including generation, operation
+  `5740e99bf32c4a7fb8ec68f8c58177aa`; 97/97 managed tests via
+  PatchedCoreRun/corerun.exe, operation `op_be1c924455aa4b6f`; managed build
+  `op_0e00eeb679ba4bec` succeeded. Includes identity/mailmap, all tag tests and
+  the whole-public-surface boundary check against the regenerated bindings.
+  The preceding tags slice passed 75/92, boundary 66/86, configuration 66/82,
+  notes 57/76, shallow 50/71, ignore/local-exclude 47/68 and diff/scalar 41/63.
 - [ ] Complete every remaining public gix capability in the `../Issues.md`
   implementation checklist, including additions made in parallel.
 - [ ] Complete the remaining boundary, profile and delivery checks below.
@@ -815,7 +839,7 @@ records: `GixObjectMetadata`, `GixSignature`, `GixCommit`, `GixCommitInfo`,
 configuration or flag-bearing data. They do not encode mutually exclusive case
 shapes and should not be changed merely because union syntax becomes available.
 
-#### Later `ffi::Option` cleanup - internal FFI debt, public API stays stable
+#### Remaining `ffi::Option` cleanup - internal FFI debt, public API stays stable
 
 Several current FFI shapes manually encode optional values even though the
 hand-written managed surface already expresses them idiomatically:
@@ -832,23 +856,23 @@ hand-written managed surface already expresses them idiomatically:
 - `create_commit_from_index` uses `has_explicit_identity` plus name/email payload
   fields, while the public API already treats the supplied identity as optional.
 
-When Interoptopus's deferred `ffi::Option` union phase is available, these are
-candidates to become real optional FFI values instead of `has_* + payload` or
-empty-value sentinels. That cleanup should **not** change the existing public
-nullable/overload contracts merely to expose generated Option cases. Generated
-Option cases remain internal; preserve public `string?`, nullable records and
-operation overloads where those are already the correct managed shape.
+`ffi::Option` already has the generated union projection. Tag creation and reads
+use real optional tagger records, and tag reads use optional signature bytes.
+Configured identities and TryResolveMailmap also use real optional signature
+records. Their generated cases stay inside the boundary; public `GixSignature?` and
+`byte[]?` contracts remain idiomatic managed values. The sentinel shapes above
+are remaining cleanup candidates, with no deferred generator prerequisite.
+Preserve their existing public nullable and overload contracts.
 
-#### Later `ffi::Result` migration checkpoint
+#### Existing `ffi::Result` verification checkpoint
 
-The current generated surface contains twelve `Result*GixError` wrapper classes,
-and 22 generated `Repo` methods obtain native results through `.AsOk()`. Failed
-`.AsOk()` calls surface `EnumException<GixError>`, which the hand-written
-`Invoke` / `InvokeStatic` methods catch and translate to `GixException`. There
-are no hand-written managed `.AsOk()` / `.AsErr()` calls today.
+`ffi::Result` already has the generated union projection. The prototype counts
+of twelve result wrappers and 22 service methods are historical; the inventory
+now grows with the implemented methods. Generated service methods obtain native
+results through `.AsOk()`, whose `EnumException<GixError>` failures reach the
+hand-written `Invoke` / `InvokeStatic` boundary and become `GixException`.
 
-When Interoptopus later projects `ffi::Result` as a union, re-audit the generated
-service/result path rather than pre-emptively rewriting GixSharp. Preserve these
+Re-audit this path when the inventory or generator changes. Preserve these
 invariants:
 
 - a native `Err` still reaches the one hand-written `GixException` translation
@@ -861,8 +885,10 @@ invariants:
 - generated Result case types remain internal under rule 8 and do not alter any
   public GixSharp signature.
 
-There is no current `ffi::Option` wrapper to migrate immediately; the optional
-sentinel shapes above are the inventory to revisit when that later phase lands.
+The tag and identity/mailmap Option paths now exercise this projection through
+the patched managed runtime. Remaining sentinel migrations are tracked separately
+above; their unchecked state does not imply that Option support is missing.
+
 ## Open architecture questions - priority order
 
 Feature/build profiles and ABI evolution are no longer open architecture
@@ -899,6 +925,10 @@ slice with its validation evidence.
   conveniences over streaming where needed.
 - [ ] Establish a managed public-API compatibility baseline. The separate
   public-signature leakage invariant is complete above.
+- [x] Accept full SHA-1 and SHA-256 values in the existing managed `GixObjectId`;
+  preserve normalization and reject malformed/abbreviated IDs. Transaction
+  `875f65e6b864ece69548835a` passes 92/92 patched-required tests
+  (`op_04ec495030de453f`). This closes managed representation only.
 - [ ] Implement explicit native profiles with both hash algorithms, runtime
   capabilities and inventory/API-guard equivalence across released engines.
 - [ ] Generalize RID staging and verify clean package consumption on supported

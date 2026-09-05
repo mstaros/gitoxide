@@ -231,13 +231,13 @@ public sealed partial class GixRepository
                 using var nativeUpdateReference =
                     GitTextEncoding.GetBytes(updateReference ?? string.Empty).Slice();
                 using var nativeAuthorName =
-                    GitTextEncoding.GetBytes(author?.Name ?? string.Empty).Slice();
+                    (author?.NameBytes ?? []).Slice();
                 using var nativeAuthorEmail =
-                    GitTextEncoding.GetBytes(author?.Email ?? string.Empty).Slice();
+                    (author?.EmailBytes ?? []).Slice();
                 using var nativeCommitterName =
-                    GitTextEncoding.GetBytes(committer?.Name ?? string.Empty).Slice();
+                    (committer?.NameBytes ?? []).Slice();
                 using var nativeCommitterEmail =
-                    GitTextEncoding.GetBytes(committer?.Email ?? string.Empty).Slice();
+                    (committer?.EmailBytes ?? []).Slice();
                 using var nativeId = repo.CreateCommitObject(
                     nativeMessage,
                     nativeTreeId,
@@ -294,10 +294,7 @@ public sealed partial class GixRepository
         var when = DateTimeOffset
             .FromUnixTimeSeconds(seconds)
             .ToOffset(TimeSpan.FromSeconds(offsetSeconds));
-        return new GixSignature(
-            GitTextEncoding.GetString(name.ToArray()),
-            GitTextEncoding.GetString(email.ToArray()),
-            when);
+        return GixSignature.FromBytes(name.ToArray(), email.ToArray(), when);
     }
 
     private static GixObjectType ReadObjectType(FfiObjectType objectType)

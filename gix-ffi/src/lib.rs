@@ -27,6 +27,7 @@ use interoptopus::{builtins_string, builtins_vec, guard, service};
 
 mod byte_stream;
 mod configuration;
+mod identity;
 mod index;
 mod ignore;
 mod diff;
@@ -34,6 +35,7 @@ mod references;
 mod notes;
 mod remote;
 mod status;
+mod tags;
 pub use byte_stream::ByteReader;
 pub use index::IndexEntryRecord;
 pub use diff::{DiffRecord, TreeChangeRecord};
@@ -43,6 +45,7 @@ pub use references::{
 pub use status::StatusRecord;
 pub use remote::RemoteRecord;
 pub use notes::{NoteRecord, NoteEntryRecord};
+pub use tags::{TagRecord, TagSignatureRecord};
 
 /// The single error type crossing the boundary.
 ///
@@ -594,6 +597,83 @@ impl Repo {
             }
             Err(error) => ffi::Err(error),
         }
+    }
+
+    /// Configured author, absent only when gix cannot resolve a complete identity.
+    pub fn get_author(&mut self) -> ffi::Result<ffi::Option<TagSignatureRecord>, GixError> {
+        let repo = self.inner.to_thread_local();
+        let result = identity::configured(repo.author());
+        // Preserve lazy persona/time state as well as in-memory configuration.
+        self.inner = repo.into_sync();
+        match result {
+            Ok(signature) => ffi::Ok(signature.into()),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Configured committer, absent only when gix cannot resolve a complete identity.
+    pub fn get_committer(&mut self) -> ffi::Result<ffi::Option<TagSignatureRecord>, GixError> {
+        let repo = self.inner.to_thread_local();
+        let result = identity::configured(repo.committer());
+        self.inner = repo.into_sync();
+        match result {
+            Ok(signature) => ffi::Ok(signature.into()),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Resolve the committer or install raw fallback bytes only in this repository session.
+    pub fn get_committer_or_set_fallback(
+        &mut self,
+        name: ffi::Slice<u8>,
+        email: ffi::Slice<u8>,
+    ) -> ffi::Result<TagSignatureRecord, GixError> {
+        let mut repo = self.inner.to_thread_local();
+        let result = repo.committer_or_set_fallback(name.as_slice(), email.as_slice())
+            .map_err(|error| GixError::Config(chain_to_string(&error)))
+            .and_then(identity::from_ref);
+        self.inner = repo.into_sync();
+        match result {
+            Ok(signature) => ffi::Ok(signature),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Resolve the committer or retain gix's generic fallback in this repository session.
+    pub fn get_committer_or_set_generic_fallback(&mut self) -> ffi::Result<TagSignatureRecord, GixError> {
+        let mut repo = self.inner.to_thread_local();
+        let result = repo.committer_or_set_generic_fallback()
+            .map_err(|error| GixError::Config(chain_to_string(&error)))
+            .and_then(identity::from_ref);
+        self.inner = repo.into_sync();
+        match result {
+            Ok(signature) => ffi::Ok(signature),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Resolve through gix's lenient repository mailmap, retaining an unmapped identity.
+    pub fn resolve_mailmap(
+        &self,
+        name: ffi::Slice<u8>,
+        email: ffi::Slice<u8>,
+        time_seconds: i64,
+        time_offset_seconds: i32,
+    ) -> TagSignatureRecord {
+        identity::resolve(&self.inner.to_thread_local(), name.as_slice(), email.as_slice(),
+            time_seconds, time_offset_seconds)
+    }
+
+    /// Resolve through gix's lenient repository mailmap, reporting absence when no mapping applies.
+    pub fn try_resolve_mailmap(
+        &self,
+        name: ffi::Slice<u8>,
+        email: ffi::Slice<u8>,
+        time_seconds: i64,
+        time_offset_seconds: i32,
+    ) -> ffi::Option<TagSignatureRecord> {
+        identity::try_resolve(&self.inner.to_thread_local(), name.as_slice(), email.as_slice(),
+            time_seconds, time_offset_seconds).into()
     }
 
     /// Whether this repository has no working tree.
@@ -1273,6 +1353,53 @@ impl Repo {
         match references::references(&repo, glob.as_slice()) {
             Ok(records) => ffi::Ok(ffi::Vec::from(records)),
             Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Create an annotated tag with exact Git bytes. An absent tagger writes no tagger header.
+    pub fn create_annotated_tag(
+        &self, name: ffi::Slice<u8>, target_id: ffi::String, data: ffi::Slice<u8>,
+        tagger: ffi::Option<TagSignatureRecord>, force: bool,
+    ) -> ffi::Result<ffi::String, GixError> {
+        let repo = self.inner.to_thread_local();
+        let tagger = match tagger.into_option() {
+            Some(value) => {
+                let name = value.name.into_vec();
+                let email = value.email.into_vec();
+                match tags::signature(&name, &email, value.time_seconds, value.time_offset_seconds) {
+                    Ok(value) => Some(value), Err(error) => return ffi::Err(error),
+                }
+            }
+            None => None,
+        };
+        match tags::create(&repo, name.as_slice(), &target_id, tagger, data.as_slice(), force) {
+            Ok(id) => ffi::Ok(id), Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Create or replace a lightweight tag without peeling its supplied object.
+    pub fn create_tag_reference(&self, name: ffi::Slice<u8>, target_id: ffi::String, force: bool)
+        -> ffi::Result<(), GixError>
+    {
+        let repo = self.inner.to_thread_local();
+        match tags::create_reference(&repo, name.as_slice(), &target_id, force) {
+            Ok(()) => ffi::Ok(()), Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Read an owned annotated-tag snapshot by exact object id.
+    pub fn read_tag(&self, tag_id: ffi::String) -> ffi::Result<TagRecord, GixError> {
+        let repo = self.inner.to_thread_local();
+        match tags::read(&repo, &tag_id) {
+            Ok(record) => ffi::Ok(record), Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Follow tag objects to the first non-tag object; other object kinds return their own id.
+    pub fn peel_tags(&self, object_id: ffi::String) -> ffi::Result<ffi::String, GixError> {
+        let repo = self.inner.to_thread_local();
+        match tags::peel(&repo, &object_id) {
+            Ok(id) => ffi::Ok(id), Err(error) => ffi::Err(error),
         }
     }
 
