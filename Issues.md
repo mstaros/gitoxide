@@ -256,7 +256,7 @@ Independent new methods continue in parallel with generator and boundary-contrac
 - [ ] Merge/snapshot/safe-checkout compatibility slice — issue `2c6f1a08`.
 - [ ] Remote metadata compatibility slice — issue `2c6f1a09`.
 - [ ] Worktree compatibility slice — issue `2c6f1a0a`.
-- [ ] Configuration compatibility slice — issue `2c6f1a0b`.
+- [x] Configuration compatibility slice — issue `2c6f1a0b`; GetConfigString, TryGetConfigString, SetConfigString and DeleteConfigValue.
 - [ ] Sparse-checkout compatibility slice — issue `2c6f1a0d`.
 
 ### Remaining public gix coverage
@@ -286,6 +286,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Remote mutation, refspecs, URL resolution and defaults — `remote/{access,build,save}.rs`, `repository/config/remote.rs`.
 - [ ] Clone preparation, fetch, ref mapping and checkout with progress/cancellation/credentials — `lib.rs`, `clone/`, `remote/connect.rs`, `remote/connection/`.
 - [ ] Full worktree administration, including remove/lock/unlock/repair/move — `repository/worktree_admin.rs`.
+- [x] Fresh raw configuration loading — `config::Snapshot::reload` backs GetConfigString/TryGetConfigString and local edit preflight. Existing permissions, includes/includeIf, private git-dir/current branch, API/CLI precedence, cwd anchoring and malformed typed-value repair are covered; transaction `d461153e562eea7ec0b754bb`.
 - [ ] Typed configuration snapshots, source/trust information and overrides — `config/snapshot/`.
 - [ ] Remaining notes platform controls: selected/display references and glob order, multi-reference lookup, shorthand mutation names and custom commit messages — `note::Platform::{refs,with_refs,get,replace,remove,with_commit_message}`. The single-ref compatibility materializer is complete; a general note cursor remains under P0c.
 - [ ] Remaining merge, checkout and sparse-checkout operations/options, including sparse pattern listing — `repository/` and their public platform types.
@@ -306,7 +307,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Complete CSharpMpc consumer migration and its full tests — issue `2c6f1a0f`.
 - [ ] Full gix coverage: every public capability accounted for, implemented through the managed boundary, validated, integrated and checked above.
 
-Latest validated expansion on 2026-09-05: notes transaction `ecab46028c7fc71d74eda427`, gix-ffi 57/57 native tests and GixSharp 76/76 managed tests. Managed build `op_6165c83baf3047e2` and patched-runtime run `op_a6e1ec1ac720430d` succeeded. The preceding shallow boundary/location slice integrated as `24b9b9e977fc0ec67f541ab4690bb8372ba963da` with 50 native and 71 managed tests; its native run `a988982311282be8300531e7bda388cf`, build `op_1b5738b5e9fe431e` and patched run `op_88bad4eb45094c28` remain evidence. Ignore/local-exclude `c051d784` passed 47 native and 68 managed tests, and diff/scalar `22c1da14` passed 41 native and 63 managed tests. These totals are validation evidence, not a coverage percentage.
+Latest validated expansion on 2026-09-05: configuration transaction `d461153e562eea7ec0b754bb`, gix-ffi 66/66 native tests (`44573d676596122f55e49dc04bd22592`) and GixSharp 82/82 managed tests. Managed build `op_d044f50e2bc94ac4` and patched-runtime run `op_d83d8f99218340ad` succeeded. Notes integrated as `ee8ffcb7` with 57 native and 76 managed tests; shallow `24b9b9e9` passed 50 native and 71 managed; ignore/local-exclude `c051d784` passed 47 native and 68 managed; diff/scalar `22c1da14` passed 41 native and 63 managed. These totals are validation evidence, not a coverage percentage.
 
 ## Sequencing evidence
 
@@ -631,20 +632,22 @@ Repository core and discovery; references and branches; guarded checkout behavio
 id: 2c6f1a0b
 kind: issue
 severity: medium
-status: open
+status: closed
 ```
 
-### Scope
+### Scope and acceptance
 
-Implement `GetConfigString`, `TryGetConfigString`, `SetConfigString`, and `DeleteConfigValue` with the same repository/local configuration contract as `LibGit2.Native`.
-
-### Acceptance
-
-Missing keys, repeated keys, include/includeIf resolution, value encoding, write locking, deletion, and linked-worktree configuration location are tested.
+- [x] GetConfigString and TryGetConfigString preserve missing, empty, implicit and repeated-key reads, with strict managed UTF-8 and exact native bytes.
+- [x] Include/includeIf resolution uses current files and HEAD. Linked worktree git-dir conditions use the private directory, matching Git; common config storage remains shared.
+- [x] SetConfigString and DeleteConfigValue follow the LibGit2.Native local-backend contract: reject repeated/included local keys, use cooperative locking and atomic publication, preserve unrelated bytes, return false for a locally missing key, and leave worktree-specific values unchanged.
+- [x] Generic values remain readable and repairable when a typed repository setting is invalid. Fresh raw `Snapshot::reload` reuses the existing loader, permissions and precedence; strict syntax errors remain errors.
+- [x] Relative repository paths stay anchored to the opening directory for raw config, conditional HEAD lookup, locks and writes. A child-process regression changes cwd to a same-named trap repository and proves it remains untouched.
+- [x] Successful persistence returns success even when typed reopening fails. Other operations then retain the handle's prior cached settings until a valid refresh; raw configuration reads always reload files. Valid identity edits affect subsequent commits on the same handle.
+- [x] Transaction `d461153e562eea7ec0b754bb`: 66/66 native tests (`44573d676596122f55e49dc04bd22592`) and 82/82 managed tests under PatchedCoreRun/corerun.exe, build `op_d044f50e2bc94ac4`, run `op_d83d8f99218340ad`. Core private-git-dir and strict raw-reload regressions accompany the implementation.
 
 ### Dependencies
 
-Repository core and discovery.
+Repository core and discovery. Typed snapshots, multivariable edits and source/trust-rich managed APIs remain in the full-coverage checklist.
 
 ## Notes parity
 
