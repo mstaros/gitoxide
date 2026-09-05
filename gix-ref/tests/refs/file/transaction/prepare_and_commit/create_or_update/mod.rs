@@ -1132,3 +1132,90 @@ fn unchanged_refs_remain_locked_until_commit_or_rollback() -> crate::Result {
     }
     Ok(())
 }
+
+#[test]
+fn invalid_commit_inputs_are_rejected_before_any_publication() -> crate::Result {
+    for invalid in ["missing identity", "invalid identity", "newline message"] {
+        let (dir, store) = empty_store()?;
+        let mut first = create_at("refs/tags/first");
+        if let Change::Update { log, .. } = &mut first.change {
+            log.force_create_reflog = false;
+        }
+        let mut second = create_at("refs/heads/second");
+        if invalid == "newline message" {
+            if let Change::Update { log, .. } = &mut second.change {
+                log.message = "invalid\nmessage".into();
+            }
+        }
+        let signature = committer();
+        let mut time = TimeBuf::default();
+        let mut actor = signature.to_ref(&mut time);
+        if invalid == "invalid identity" {
+            actor.name = b"invalid\nname".as_bstr();
+        }
+        let identity = if invalid == "missing identity" { None } else { Some(actor) };
+        store.transaction().prepare(
+            [first, second], Fail::Immediately, Fail::Immediately,
+        )?.commit(identity).expect_err("invalid reflog input must be rejected");
+        assert!(store.try_find_loose("refs/tags/first")?.is_none(),
+            "a tag without a reflog must not publish before validation fails");
+        assert!(store.try_find_loose("refs/heads/second")?.is_none());
+        assert!(!dir.path().join("logs").exists(), "preflight must not create or partially write reflogs");
+        assert!(!dir.path().join("refs/heads/second.lock").exists(), "failure releases all guards");
+    }
+    Ok(())
+}
+
+#[test]
+fn unused_reflog_inputs_do_not_require_identity() -> crate::Result {
+    let (_dir, store) = empty_store()?;
+    let mut tag = create_at("refs/tags/no-log");
+    if let Change::Update { log, .. } = &mut tag.change {
+        log.force_create_reflog = false;
+    }
+    store.transaction().prepare(
+        [tag], Fail::Immediately, Fail::Immediately,
+    )?.commit(None)?;
+    let reference = create_at("refs/heads/unchanged");
+    store.transaction().prepare(
+        [reference.clone()], Fail::Immediately, Fail::Immediately,
+    )?.commit(committer().to_ref(&mut TimeBuf::default()))?;
+    store.transaction().prepare(
+        [reference], Fail::Immediately, Fail::Immediately,
+    )?.commit(None)?;
+    Ok(())
+}
+
+#[test]
+fn commit_failure_reports_published_refs_and_attempted_reflogs() -> crate::Result {
+    let (dir, store) = empty_store()?;
+    let mut first = create_at("refs/tags/first");
+    if let Change::Update { log, .. } = &mut first.change {
+        log.force_create_reflog = false;
+    }
+    let prepared = store.transaction().prepare(
+        [first, create_at("refs/heads/second")], Fail::Immediately, Fail::Immediately,
+    )?;
+    let blocked_log = dir.path().join("logs/refs/heads/second");
+    std::fs::create_dir_all(&blocked_log)?;
+    std::fs::write(blocked_log.join("obstruction"), b"caller-owned bytes")?;
+    let err = prepared.commit(committer().to_ref(&mut TimeBuf::default()))
+        .expect_err("the obstructed reflog must fail during publication");
+    let transaction::commit::Error::PartialCommit {
+        source, edits, completed_refs, attempted_reflogs, packed_refs_committed,
+    } = err else {
+        panic!("partial publication must carry recovery evidence: {err}");
+    };
+    assert!(matches!(*source, transaction::commit::Error::CreateOrUpdateRefLog(_)));
+    assert_eq!(edits.len(), 2, "all prepared edits retain their expected and desired values");
+    assert_eq!(completed_refs.len(), 1);
+    assert_eq!(completed_refs[0].as_bstr(), "refs/tags/first");
+    assert_eq!(attempted_reflogs.len(), 1);
+    assert_eq!(attempted_reflogs[0].as_bstr(), "refs/heads/second");
+    assert!(!packed_refs_committed);
+    assert!(store.try_find_loose("refs/tags/first")?.is_some());
+    assert!(store.try_find_loose("refs/heads/second")?.is_none());
+    assert_eq!(std::fs::read(blocked_log.join("obstruction"))?, b"caller-owned bytes");
+    assert!(!dir.path().join("refs/heads/second.lock").exists());
+    Ok(())
+}

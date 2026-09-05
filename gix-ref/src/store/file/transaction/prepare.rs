@@ -259,7 +259,7 @@ impl Transaction<'_, '_> {
     /// If the operation succeeds, the transaction can be committed or dropped to cause a rollback automatically.
     /// Verified refs, including unchanged refs, remain locked until transaction completion.
     /// Rollbacks happen automatically on failure and they tend to be perfect.
-    /// This method is idempotent.
+    /// Call this method once, then commit or drop the prepared transaction.
     pub fn prepare(
         self,
         edits: impl IntoIterator<Item = RefEdit>,
