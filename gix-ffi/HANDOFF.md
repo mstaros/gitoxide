@@ -907,6 +907,10 @@ slice with its validation evidence.
   conveniences over streaming where needed.
 - [ ] Establish a managed public-API compatibility baseline. The separate
   public-signature leakage invariant is complete above.
+- [x] Accept full SHA-1 and SHA-256 values in the existing managed `GixObjectId`;
+  preserve normalization and reject malformed/abbreviated IDs. Transaction
+  `875f65e6b864ece69548835a` passes 92/92 patched-required tests
+  (`op_04ec495030de453f`). This closes managed representation only.
 - [ ] Implement explicit native profiles with both hash algorithms, runtime
   capabilities and inventory/API-guard equivalence across released engines.
 - [ ] Generalize RID staging and verify clean package consumption on supported
