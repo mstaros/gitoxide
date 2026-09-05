@@ -2,25 +2,26 @@
 
 Entry point: Repository::blob_export(Limits) -> Platform.
 The reader reopens the repository with explicit object allocation limits and
-replacement refs disabled.
+replacement refs disabled. Reopening anchors the Git directory to the original
+captured working directory and retains the caller's repository trust level.
 
 ## Completed implementation checklist
-- [x] Tree::try_find_entry consumes the full encoding, including trailing errors.
+- [x] `Tree::try_find_entry` consumes the full encoding, including trailing errors.
       Existing best-effort lookup APIs retain their signatures.
-- [x] Platform::list_tree validates every visited tree's bytes and OID, complete
+- [x] `Platform::list_tree` validates every visited tree's bytes and OID, complete
       decoding, legal mode encodings, ordering, duplicate names and components.
-- [x] Platform::write_tree preserves byte paths, full OIDs and depth-first order;
+- [x] `Platform::write_tree` preserves byte paths, full OIDs and depth-first order;
       tested against git ls-tree -z --full-tree with -r, -t, -d (including gitlinks),
       -l, --name-only and --object-only.
-- [x] Platform::read_object checks hash kind, header size/kind, decoded size/kind
+- [x] `Platform::read_object` checks hash kind, header size/kind, decoded size/kind
       and recomputed content OID. Verified kind/size/raw data match git cat-file.
-- [x] Platform::write_blob verifies before output and writes in 64 KiB chunks.
+- [x] `Platform::write_blob` verifies before output and writes in 64 KiB chunks.
       An optional expected size binds external lock metadata.
-- [x] Platform::export_blob syncs a temporary sibling and uses no-clobber file
+- [x] `Platform::export_blob` syncs a temporary sibling and uses no-clobber file
       publication. Existing files/directories/links are never replaced.
 - [x] Tests cover SHA-1/SHA-256, raw binary paths/data, empty blobs/trees, modes,
       packed delta objects, corruption, missing/wrong objects, limits,
-      unsupported formats, cancellation and output failure.
+      unsupported formats, cancellation and output failure and process-directory changes.
 
 ## Deliberate boundary
 This API is not a Git command-line parser. Paths are always root-relative and

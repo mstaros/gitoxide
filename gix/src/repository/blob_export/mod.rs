@@ -127,8 +127,8 @@ impl Repository {
             return Err(Error::InvalidLimits.raise());
         }
         let mut repo = crate::open_opts(
-            self.git_dir(),
-            crate::open::Options::isolated().config_overrides([
+            self.current_dir().join(self.git_dir()),
+            crate::open::Options::isolated().with(self.git_dir_trust()).config_overrides([
                 format!("gitoxide.objects.allocLimit={}", limits.object_bytes),
             ]),
         ).map_err(|err| source("open bounded object reader", err))?;
