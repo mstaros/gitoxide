@@ -237,18 +237,15 @@ impl Transaction<'_, '_> {
                     (true, matches!(new, Target::Symbolic(_)))
                 };
 
-                let keep_lock_for_loose_source_delete = direct_to_packed_refs && matches!(new, Target::Object(_));
                 if (is_effective && !direct_to_packed_refs) || is_symbolic {
                     lock.with_mut(|file| match new {
                         Target::Object(oid) => writeln!(file, "{oid}"),
                         Target::Symbolic(name) => writeln!(file, "ref: {}", name.0),
                     })?;
-                    Some(lock.close()?)
-                } else if keep_lock_for_loose_source_delete {
-                    Some(lock.close()?)
-                } else {
-                    None
                 }
+                // Even unchanged refs guard the transaction. Commit retains these
+                // hold-only locks without publishing their empty contents.
+                Some(lock.close()?)
             }
         };
         change.lock = lock;
@@ -260,6 +257,7 @@ impl Transaction<'_, '_> {
     /// Prepare for calling [`commit(…)`][Transaction::commit()] in a way that can be rolled back perfectly.
     ///
     /// If the operation succeeds, the transaction can be committed or dropped to cause a rollback automatically.
+    /// Verified refs, including unchanged refs, remain locked until transaction completion.
     /// Rollbacks happen automatically on failure and they tend to be perfect.
     /// This method is idempotent.
     pub fn prepare(

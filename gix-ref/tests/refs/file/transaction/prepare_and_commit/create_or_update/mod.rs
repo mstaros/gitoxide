@@ -1073,3 +1073,62 @@ fn preparation_rejects_symbolic_target_races() -> crate::Result {
     }
     Ok(())
 }
+
+#[test]
+fn unchanged_refs_remain_locked_until_commit_or_rollback() -> crate::Result {
+    for packed in [false, true] {
+        for commit in [false, true] {
+            let (dir, store) = empty_store()?;
+            let commit_id = hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+            let name = "refs/heads/guard";
+            let loose_path = dir.path().join(name);
+            if packed {
+                std::fs::write(
+                    store.packed_refs_path(),
+                    format!("# pack-refs with: peeled fully-peeled sorted\n{commit_id} {name}\n"),
+                )?;
+            } else {
+                std::fs::create_dir_all(loose_path.parent().expect("ref parent"))?;
+                std::fs::write(&loose_path, format!("{commit_id}\n"))?;
+            }
+            let mut guard = create_at(name);
+            if let Change::Update { expected, .. } = &mut guard.change {
+                *expected = PreviousValue::MustExistAndMatch(Target::Object(commit_id));
+            }
+            let transaction = store.transaction().prepare(
+                [guard, create_at("refs/heads/other")],
+                Fail::Immediately,
+                Fail::Immediately,
+            )?;
+            let competitor = gix_ref::file::Store::at(dir.path().into(), crate::fixture_hash_kind());
+            let refused = competitor.transaction().prepare(
+                [delete_at(name)], Fail::Immediately, Fail::Immediately,
+            ).expect_err("the unchanged ref still guards the prepared transaction");
+            assert!(
+                matches!(refused, transaction::prepare::Error::LockAcquire { .. }
+                    | transaction::prepare::Error::PackedTransactionAcquire(_)),
+                "the competing transaction must fail on lock contention: {refused}"
+            );
+            assert!(
+                gix_lock::Marker::acquire_to_hold_resource(
+                    &loose_path, Fail::Immediately, None,
+                ).is_err(),
+                "the individual ref remains locked even when packed-refs also guards it"
+            );
+
+            if commit {
+                transaction.commit(committer().to_ref(&mut TimeBuf::default()))?;
+            } else {
+                transaction.rollback();
+            }
+            assert_eq!(store.find(name)?.target, Target::Object(commit_id));
+            assert_eq!(loose_path.exists(), !packed, "a hold-only lock must never publish an empty ref");
+            assert!(!loose_path.with_extension("lock").exists(), "the guard is released at transaction end");
+            assert_eq!(dir.path().join("refs/heads/other").exists(), commit);
+            competitor.transaction().prepare(
+                [delete_at(name)], Fail::Immediately, Fail::Immediately,
+            )?.rollback();
+        }
+    }
+    Ok(())
+}

@@ -92,6 +92,12 @@ impl Transaction<'_, '_> {
                         change.lock = lock;
                         continue;
                     }
+                    if !update_ref || matches!(expected, PreviousValue::MustExistAndMatch(previous) if previous == new) {
+                        // Verification and symbolic-parent locks protect the remaining
+                        // edits too. Release them only when the transaction ends.
+                        change.lock = lock;
+                        continue;
+                    }
                     if update_ref {
                         if let Some(Err(err)) = lock.map(gix_lock::Marker::commit) {
                             // TODO: when Kind::IsADirectory becomes stable, use that.
