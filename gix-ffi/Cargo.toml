@@ -30,6 +30,7 @@ gix = { path = "../gix", features = [
     "worktree-mutation",
     "blocking-network-client",
 ] }
+gix-shallow = { path = "../gix-shallow" }
 interoptopus_mps = { version = "0.17.1", registry = "local" }
 
 [dev-dependencies]
