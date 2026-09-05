@@ -85,7 +85,7 @@ The counter was working - an earlier failed attempt in the first of those transa
 
 ### What is still owed
 
-- Confirm empirically that a gitoxide commit now plans steps for `gix-ffi`, by reading the plan in a commit operation log rather than assuming it. Until that is seen, do not rely on gate evidence for this crate.
+- [x] Confirmed on 2026-09-05: commit `22c1da145e895e0f57768cdbffec6ed37df6161b`, operation `8ca35416ea509e2619aaa5a57668e16d`, explicitly compiled the nested `gix-ffi` workspace and ran 41/41 native tests. This supplies current evidence; it does not retroactively validate the two historical commits.
 - Treat the two commits above as unvalidated for `gix-ffi` regardless of what their evidence says.
 - `plan_workspace_selections` skips changes that no package owns. That is correct for `Issues.md`, `Interop.cs` and other non-Cargo inputs, and the code says the claiming decision belongs to the provider. Confirm what the provider does with them, because an unowned path silently counting as covered is the same shape as the failure above.
 
@@ -244,6 +244,7 @@ Independent new methods continue in parallel with generator and boundary-contrac
 - [x] Index/conflicts compatibility slice — issue `2c6f1a04`.
 - [x] References/branches compatibility slice — issue `2c6f1a05`.
 - [x] Diff/patch/tree-change compatibility slice — issue `2c6f1a06`; transaction `691180980e389df06166ef8f`, 41 native and 63 managed tests passed.
+- [x] Ignore/local-exclude compatibility slice — issue `2c6f1a07`; transaction `f5f6689c91e8ace3f5dd7828`, 47 native and 68 managed tests passed.
 - [x] P0a byte-stream boundary prototype and measurements — `61739044966d033186908aa4ef25157ff981d7a6`; public stream coverage remains below.
 - [x] Read the physical index for status/staging, including unchanged-timestamp writes; remove test reopen workarounds — `b3f28217b0b4310aa6e26782467875bbbfc31c84`, 31 native and 54 managed tests passed.
 - [x] Preserve work during linked-worktree removal — integrated transaction `f4ff9277b6b18b97692a2d52`.
@@ -251,7 +252,6 @@ Independent new methods continue in parallel with generator and boundary-contrac
 
 ### Remaining compatibility slices
 
-- [ ] Ignore/local-exclude compatibility slice — issue `2c6f1a07`.
 - [ ] Merge/snapshot/safe-checkout compatibility slice — issue `2c6f1a08`.
 - [ ] Remote metadata compatibility slice — issue `2c6f1a09`.
 - [ ] Worktree compatibility slice — issue `2c6f1a0a`.
@@ -293,7 +293,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 
 ### Boundary, delivery and completion
 
-- [ ] Complete named/multi-field Rust enum support in Interoptopus — `docs/csharp-multi-field-variants.md`; Step 1 is done, Steps 2–5 remain.
+- [ ] Complete named/multi-field Rust enum support in Interoptopus — `docs/csharp-multi-field-variants.md`; Steps 1–2 are done (`dbb6c0d` completes Step 2), Steps 3–5 remain.
 - [x] Make the GixError mapper exhaustive with generated case types and promote missing-case diagnostic CS8509 to an error; compiler probe and managed behavior verified.
 - [ ] P0b stable error envelope: Kind, extensible Code, retryability and actionable typed recovery detail.
 - [ ] P0c bounded structured cursors with terminal/error semantics and ownership-closure checks.
@@ -305,7 +305,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Complete CSharpMpc consumer migration and its full tests — issue `2c6f1a0f`.
 - [ ] Full gix coverage: every public capability accounted for, implemented through the managed boundary, validated, integrated and checked above.
 
-Latest validated expansion on 2026-09-05: transaction `691180980e389df06166ef8f`, gix-ffi 41/41 native tests and GixSharp 63/63 managed tests. Managed build `op_495d6086de144daa` and patched-runtime run `op_15363769012d4c5e` succeeded. The earlier foundation at `b3f28217` had 31 native and 54 managed tests. These totals are validation evidence, not a coverage percentage.
+Latest validated expansion on 2026-09-05: ignore/local-exclude transaction `f5f6689c91e8ace3f5dd7828`, gix-ffi 47/47 native tests and GixSharp 68/68 managed tests. Managed build `op_8484ab4d7bdd4f72` and patched-runtime run `op_ea21d21f00a54bc7` succeeded. The preceding diff/scalar expansion integrated as `22c1da145e895e0f57768cdbffec6ed37df6161b` with 41 native and 63 managed tests. The earlier foundation at `b3f28217` had 31 native and 54 managed tests. These totals are validation evidence, not a coverage percentage.
 
 ## Sequencing evidence
 
@@ -537,7 +537,7 @@ This closes the documented compatibility slice. Configurable advanced diff resou
 id: 2c6f1a07
 kind: issue
 severity: medium
-status: open
+status: closed
 ```
 
 ### Scope
@@ -551,6 +551,15 @@ Precedence matches Git behavior, exact path bytes are preserved, duplicate rules
 ### Dependencies
 
 Repository core and discovery.
+
+
+### Resolution
+
+- [x] `IsPathIgnored` and `EnsureLocalExclude` have native, generated and managed string/byte overloads; paths use repository-relative '/' separators and an explicit directory flag.
+- [x] Ignore matching follows Git precedence, including global/local/repository rules, nested negation, tracked paths and fresh rule reads on the same handle.
+- [x] Local additions are literal root-anchored rules: escape metacharacters, preserve existing bytes and line endings, avoid duplicate lines and write through the owned `gix::lock::File` lock. Failed acquisition preserves a foreign lock.
+- [x] Normal, bare and linked worktrees are covered; linked worktrees use common `info/exclude`. Higher-priority negation remains authoritative: the added rule is retained and the failed verification is reported.
+- [x] Six native ignore tests compare behavior with Git; five managed tests exercise marshaling, disposal, errors, exact bytes and shared paths. Full suites passed 47/47 native and 68/68 managed under the patched runtime in transaction `f5f6689c91e8ace3f5dd7828`.
 
 ## Merge, snapshot, and checkout parity
 

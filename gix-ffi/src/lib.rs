@@ -27,6 +27,7 @@ use interoptopus::{builtins_string, builtins_vec, guard, service};
 
 mod byte_stream;
 mod index;
+mod ignore;
 mod diff;
 mod references;
 mod status;
@@ -532,6 +533,32 @@ impl Repo {
         let repo = self.inner.to_thread_local();
         let bytes = gix::path::into_bstr(repo.git_dir().to_owned()).into_owned();
         ffi::Ok(ffi::Vec::from(Vec::from(bytes)))
+    }
+
+    /// Match repository, local and global ignore rules against a relative Git path.
+    pub fn is_path_ignored(
+        &self,
+        path: ffi::Slice<u8>,
+        is_directory: bool,
+    ) -> ffi::Result<bool, GixError> {
+        let repo = self.inner.to_thread_local();
+        match ignore::is_path_ignored(&repo, path.as_slice(), is_directory) {
+            Ok(ignored) => ffi::Ok(ignored),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Add an exact, root-anchored rule to the common info/exclude file.
+    pub fn ensure_local_exclude(
+        &self,
+        path: ffi::Slice<u8>,
+        is_directory: bool,
+    ) -> ffi::Result<(), GixError> {
+        let repo = self.inner.to_thread_local();
+        match ignore::ensure_local_exclude(&repo, path.as_slice(), is_directory) {
+            Ok(()) => ffi::Ok(()),
+            Err(err) => ffi::Err(err),
+        }
     }
 
     /// Whether this repository has no working tree.

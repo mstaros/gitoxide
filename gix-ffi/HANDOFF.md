@@ -2,7 +2,8 @@
 
 Status updated on 2026-09-05. The earlier foundation was verified at
 `b3f28217b0b4310aa6e26782467875bbbfc31c84`; the completed wrapper expansion is
-recorded in transaction `691180980e389df06166ef8f`.
+integrated as `22c1da14`. The subsequent ignore/local-exclude slice is
+recorded in transaction `f5f6689c91e8ace3f5dd7828`.
 The completion goal is full public gix coverage, confirmed by the user.
 Use the checkboxes here for boundary work and the implementation checklist in
 `../Issues.md` for method/domain coverage. Historical prototype counts and examples
@@ -12,7 +13,7 @@ below are design context, not current progress totals.
 
 A .NET binding over gitoxide (`gix`) targeting **full gix coverage**.
 
-**Status: implementation in progress.** Both layers work end to end. Six
+**Status: implementation in progress.** Both layers work end to end. Seven
 initial compatibility slices are complete, with additional gix methods still to
 implement. Full gix coverage includes methods being added to the fork in parallel.
 Independent methods continue while their applicable boundary contracts are completed.
@@ -39,6 +40,8 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
 - [x] Index/conflicts compatibility slice.
 - [x] References/branches compatibility slice.
 - [x] Diff/patch/tree-change compatibility slice, with exact-byte snapshots.
+- [x] Ignore/local-exclude compatibility slice, including exact-byte/idempotent
+  writes, Git precedence and linked-worktree common-directory routing.
 - [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
 - [x] Exhaustive GixError case matching; CS8509 is an error and the missing-case
   compiler probe and all ten mappings are verified.
@@ -48,9 +51,10 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   0.17.1 from registry `local`.
 - [x] Fresh-index status/staging correction integrated at `b3f28217`;
   retained foundation validation: 31/31 native tests and 54/54 managed tests.
-- [x] Expansion validation: 41/41 native tests; 63/63 managed tests via
-  PatchedCoreRun/corerun.exe, operation `op_15363769012d4c5e`; managed build
-  `op_495d6086de144daa` succeeded.
+- [x] Expansion validation: 47/47 native tests; 68/68 managed tests via
+  PatchedCoreRun/corerun.exe, operation `op_ea21d21f00a54bc7`; managed build
+  `op_8484ab4d7bdd4f72` succeeded. The preceding diff/scalar slice passed
+  41/41 native and 63/63 managed tests.
 - [ ] Complete every remaining public gix capability in the `../Issues.md`
   implementation checklist, including additions made in parallel.
 - [ ] Complete the remaining boundary, profile and delivery checks below.
@@ -619,7 +623,9 @@ already consumed by GixSharp. The remaining rich-variant work has its own plan.
 - [x] Snapshot/builtin-helper/naming issues `ccb105a2`, `2a6da76a`,
   `09b82d44`, `4e9a17c3` and `7c8cb22e` are closed.
 - [x] Interoptopus named/multi-field Step 1: derived Payload/payloads accessors.
-- [ ] Complete named/multi-field Steps 2–5 in
+- [x] Interoptopus named/multi-field Step 2: output/model consumers use payload
+  views; byte-identical reference output and patched C# suite passed (`dbb6c0d`).
+- [ ] Complete named/multi-field Steps 3–5 in
   `interoptopus/docs/csharp-multi-field-variants.md` before exposing API shapes
   that require those variants.
 - [ ] Complete the remaining GixSharp public-surface and semantic-error adoption
