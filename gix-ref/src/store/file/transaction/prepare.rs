@@ -61,12 +61,35 @@ impl Transaction<'_, '_> {
         }
     }
 
+    /// Verify that splitting still describes the reference whose lock we hold.
+    fn check_symbolic_referent(
+        name: &FullNameRef,
+        existing: Option<&Reference>,
+        expected: Option<&Option<FullName>>,
+    ) -> Result<(), Error> {
+        if let Some(expected) = expected {
+            let actual = existing.and_then(|reference| match &reference.target {
+                Target::Symbolic(name) => Some(name),
+                Target::Object(_) => None,
+            });
+            if expected.as_ref() != actual {
+                return Err(Error::SymbolicReferenceChanged {
+                    full_name: name.as_bstr().to_owned(),
+                    expected: expected.clone(),
+                    actual: actual.cloned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn lock_ref_and_apply_change(
         store: &file::Store,
         lock_fail_mode: gix_lock::acquire::Fail,
         packed: Option<&packed::Buffer>,
         change: &mut Edit,
         direct_to_packed_refs: bool,
+        expected_referent: Option<&Option<FullName>>,
     ) -> Result<(), Error> {
         use std::io::Write;
         assert!(
@@ -91,6 +114,11 @@ impl Transaction<'_, '_> {
                 .map_err(|err| Self::lock_acquire_error(err, "borrowcheck won't allow change.name()"))?;
 
                 let existing_ref = Self::read_existing_ref(store, change.update.name.as_ref(), packed)?;
+                Self::check_symbolic_referent(
+                    change.update.name.as_ref(),
+                    existing_ref.as_ref(),
+                    expected_referent,
+                )?;
 
                 match (&expected, &existing_ref) {
                     (PreviousValue::MustNotExist, _) => {
@@ -144,6 +172,11 @@ impl Transaction<'_, '_> {
                 let mut lock = obtain_lock()?;
 
                 let existing_ref = Self::read_existing_ref(store, change.update.name.as_ref(), packed)?;
+                Self::check_symbolic_referent(
+                    change.update.name.as_ref(),
+                    existing_ref.as_ref(),
+                    expected_referent,
+                )?;
 
                 match (&expected, &existing_ref) {
                     (PreviousValue::Any, _)
@@ -258,14 +291,23 @@ impl Transaction<'_, '_> {
                 leaf_referent_previous_oid: None,
             })
             .collect();
+        let mut symbolic_referents = std::collections::BTreeMap::new();
         updates
             .pre_process(
                 &mut |name| {
                     let symbolic_refs_are_never_packed = None;
-                    store
+                    let target = store
                         .find_existing_inner(name, symbolic_refs_are_never_packed)
                         .map(|r| r.target)
-                        .ok()
+                        .ok();
+                    symbolic_referents.insert(
+                        name.as_bstr().to_owned(),
+                        match &target {
+                            Some(Target::Symbolic(referent)) => Some(referent.clone()),
+                            _ => None,
+                        },
+                    );
+                    target
                 },
                 &mut |idx, update| Edit {
                     update,
@@ -388,6 +430,7 @@ impl Transaction<'_, '_> {
                     self.packed_refs,
                     PackedRefs::DeletionsAndNonSymbolicUpdatesRemoveLooseSourceReference(_)
                 ),
+                symbolic_referents.get(&change.update.name.0),
             ) {
                 let err = match err {
                     Error::LockAcquire {
@@ -508,6 +551,12 @@ mod error {
             full_name: BString,
             expected: Target,
             actual: Target,
+        },
+        #[error("The symbolic target of reference {full_name:?} changed during preparation: expected {expected:?}, actual {actual:?}")]
+        SymbolicReferenceChanged {
+            full_name: BString,
+            expected: Option<crate::FullName>,
+            actual: Option<crate::FullName>,
         },
         #[error("Could not read reference")]
         ReferenceDecode(#[from] file::loose::reference::decode::Error),

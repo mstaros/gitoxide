@@ -999,3 +999,77 @@ fn packed_refs_deletion_in_deletions_and_updates_mode() -> crate::Result {
     );
     Ok(())
 }
+
+#[test]
+fn preparation_rejects_symbolic_target_races() -> crate::Result {
+    struct ChangeHeadDuringPeeling {
+        path: std::path::PathBuf,
+        contents: Option<String>,
+    }
+
+    impl gix_object::Find for ChangeHeadDuringPeeling {
+        fn try_find<'a>(
+            &self,
+            id: &gix_hash::oid,
+            buffer: &'a mut Vec<u8>,
+        ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+            // Packed refs are peeled after symbolic splitting, before loose refs are locked.
+            match &self.contents {
+                Some(contents) => std::fs::write(&self.path, contents)?,
+                None => match std::fs::remove_file(&self.path) {
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    result => result?,
+                },
+            }
+            gix_object::Find::try_find(&EmptyCommit, id, buffer)
+        }
+    }
+
+    let commit_id = hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+    let direct = format!("{commit_id}\n");
+    let main = "ref: refs/heads/main\n".to_owned();
+    let side = "ref: refs/heads/side\n".to_owned();
+    for (before, after) in [
+        (Some(main.clone()), Some(side.clone())),
+        (Some(main.clone()), Some(direct.clone())),
+        (Some(direct.clone()), Some(side.clone())),
+        (None, Some(side)),
+        (Some(main), None),
+    ] {
+        for delete in [false, true] {
+            let (dir, store) = empty_store()?;
+            let head_path = dir.path().join("HEAD");
+            if let Some(before) = &before {
+                std::fs::write(&head_path, before)?;
+            }
+            let mut edit = if delete { delete_at("HEAD") } else { create_at("HEAD") };
+            edit.deref = true;
+            if let Change::Update { expected, .. } = &mut edit.change {
+                *expected = PreviousValue::Any;
+            }
+            let err = store.transaction()
+                .packed_refs(PackedRefs::DeletionsAndNonSymbolicUpdates(Box::new(ChangeHeadDuringPeeling {
+                    path: head_path.clone(),
+                    contents: after.clone(),
+                })))
+                .prepare(
+                    [edit, create_at("refs/heads/trigger")],
+                    Fail::Immediately,
+                    Fail::Immediately,
+                )
+                .expect_err("a changed symbolic target must abort preparation");
+            assert!(
+                err.to_string().contains("symbolic target"),
+                "the failure must identify the changed symbolic target: {err}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&head_path).ok(), after,
+                "the competing writer's HEAD must be preserved"
+            );
+            assert!(!head_path.with_extension("lock").exists(), "failed preparation releases HEAD");
+            assert!(!dir.path().join("packed-refs.lock").exists(), "packed locks roll back");
+            assert!(!dir.path().join("refs/heads/trigger").exists(), "no other ref is published");
+        }
+    }
+    Ok(())
+}
