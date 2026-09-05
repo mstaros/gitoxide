@@ -245,6 +245,7 @@ Independent new methods continue in parallel with generator and boundary-contrac
 - [x] References/branches compatibility slice — issue `2c6f1a05`.
 - [x] Diff/patch/tree-change compatibility slice — issue `2c6f1a06`; transaction `691180980e389df06166ef8f`, 41 native and 63 managed tests passed.
 - [x] Ignore/local-exclude compatibility slice — issue `2c6f1a07`; transaction `f5f6689c91e8ace3f5dd7828`, 47 native and 68 managed tests passed.
+- [x] Notes compatibility slice — issue `2c6f1a0c`; transaction `ecab46028c7fc71d74eda427`, 57 native and 76 managed tests passed.
 - [x] P0a byte-stream boundary prototype and measurements — `61739044966d033186908aa4ef25157ff981d7a6`; public stream coverage remains below.
 - [x] Read the physical index for status/staging, including unchanged-timestamp writes; remove test reopen workarounds — `b3f28217b0b4310aa6e26782467875bbbfc31c84`, 31 native and 54 managed tests passed.
 - [x] Preserve work during linked-worktree removal — integrated transaction `f4ff9277b6b18b97692a2d52`.
@@ -256,7 +257,6 @@ Independent new methods continue in parallel with generator and boundary-contrac
 - [ ] Remote metadata compatibility slice — issue `2c6f1a09`.
 - [ ] Worktree compatibility slice — issue `2c6f1a0a`.
 - [ ] Configuration compatibility slice — issue `2c6f1a0b`.
-- [ ] Notes compatibility slice — issue `2c6f1a0c`.
 - [ ] Sparse-checkout compatibility slice — issue `2c6f1a0d`.
 
 ### Remaining public gix coverage
@@ -287,7 +287,8 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Clone preparation, fetch, ref mapping and checkout with progress/cancellation/credentials — `lib.rs`, `clone/`, `remote/connect.rs`, `remote/connection/`.
 - [ ] Full worktree administration, including remove/lock/unlock/repair/move — `repository/worktree_admin.rs`.
 - [ ] Typed configuration snapshots, source/trust information and overrides — `config/snapshot/`.
-- [ ] Remaining merge, checkout, notes and sparse-checkout operations/options, including sparse pattern listing — `repository/` and their public platform types.
+- [ ] Remaining notes platform controls: selected/display references and glob order, multi-reference lookup, shorthand mutation names and custom commit messages — `note::Platform::{refs,with_refs,get,replace,remove,with_commit_message}`. The single-ref compatibility materializer is complete; a general note cursor remains under P0c.
+- [ ] Remaining merge, checkout and sparse-checkout operations/options, including sparse pattern listing — `repository/` and their public platform types.
 - [ ] Public object/worktree byte streams and archives — `repository/{object,worktree}.rs`; the existing managed byte-reader entry points are internal prototypes.
 - [ ] Reconcile every remaining reachable public gix API and feature-gated capability, including subsequent parallel additions, against the managed coverage above. Record remaining gaps here before claiming completion.
 
@@ -305,7 +306,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Complete CSharpMpc consumer migration and its full tests — issue `2c6f1a0f`.
 - [ ] Full gix coverage: every public capability accounted for, implemented through the managed boundary, validated, integrated and checked above.
 
-Latest validated expansion on 2026-09-05: shallow boundary/location transaction `617a0c2ea46d9ae649f97241`, gix-ffi 50/50 native tests and GixSharp 71/71 managed tests. Native run `a988982311282be8300531e7bda388cf`, managed build `op_1b5738b5e9fe431e` and patched-runtime run `op_88bad4eb45094c28` succeeded. The preceding ignore/local-exclude slice integrated as `c051d7844c5a94cd606215de9d3ea951a98c715f` with 47 native and 68 managed tests; the diff/scalar slice `22c1da14` passed 41 native and 63 managed tests. These totals are validation evidence, not a coverage percentage.
+Latest validated expansion on 2026-09-05: notes transaction `ecab46028c7fc71d74eda427`, gix-ffi 57/57 native tests and GixSharp 76/76 managed tests. Managed build `op_6165c83baf3047e2` and patched-runtime run `op_a6e1ec1ac720430d` succeeded. The preceding shallow boundary/location slice integrated as `24b9b9e977fc0ec67f541ab4690bb8372ba963da` with 50 native and 71 managed tests; its native run `a988982311282be8300531e7bda388cf`, build `op_1b5738b5e9fe431e` and patched run `op_88bad4eb45094c28` remain evidence. Ignore/local-exclude `c051d784` passed 47 native and 68 managed tests, and diff/scalar `22c1da14` passed 41 native and 63 managed tests. These totals are validation evidence, not a coverage percentage.
 
 ## Sequencing evidence
 
@@ -651,7 +652,7 @@ Repository core and discovery.
 id: 2c6f1a0c
 kind: issue
 severity: medium
-status: open
+status: closed
 ```
 
 ### Scope
@@ -665,6 +666,19 @@ Default and custom notes refs, overwrite behavior, author/committer signatures, 
 ### Dependencies
 
 Objects and commit graph; references and branches.
+
+### Resolution
+
+- [x] `GitNote`, `GitNoteEntry` and all five methods are implemented with the existing consumer signatures, plus configured-default and byte-oriented overloads. `ReadNote` throws `KeyNotFoundException` for absence; `TryReadNote` and `RemoveNote` return false. Corrupt notes remain errors.
+- [x] Exact note/ref bytes cross the ABI; owned note and signature byte snapshots survive native/repository disposal. Record init/with assignments keep decoded text and stored bytes consistent. Returned signatures describe the current notes commit, matching the existing consumer.
+- [x] The facade reuses `gix::note::plumbing::{get,replace,remove}`, `new_commit_as` and guarded reference edits. Notes fanout and non-note tree entries are preserved. Creation, replacement, deletion and every symbolic link are guarded against competing ref edits; foreign locks remain owned by their writer.
+- [x] Default/custom/disabled refs, overwrite refusal, empty notes, signatures, missing notes, deterministic enumeration, deletion retaining an empty notes commit, symbolic refs, lock contention and corruption are tested. Native comparisons use Git as the oracle.
+- [x] Transaction `ecab46028c7fc71d74eda427` includes regenerated bindings and passes 57/57 nested native tests (seven dedicated notes tests) and 76/76 managed tests (five dedicated TUnit tests). Build `op_6165c83baf3047e2` and patched-required run `op_a6e1ec1ac720430d` succeeded after merging shallow metadata commit `24b9b9e9`.
+
+This closes the documented compatibility slice. Display-reference selection/globs, multi-reference lookup, custom mutation messages and general cursor delivery remain in the full-gix checklist.
+
+Implemented and validated with OpenAI Codex assistance.
+
 
 ## Sparse checkout parity
 
