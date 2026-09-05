@@ -27,10 +27,12 @@ use interoptopus::{builtins_string, builtins_vec, guard, service};
 
 mod byte_stream;
 mod index;
+mod diff;
 mod references;
 mod status;
 pub use byte_stream::ByteReader;
 pub use index::IndexEntryRecord;
+pub use diff::{DiffRecord, TreeChangeRecord};
 pub use references::{
     BranchRecord, OptionalObjectId, ReferenceLockLease, ReferenceRecord, ReferenceUpdateOutcome,
 };
@@ -537,6 +539,11 @@ impl Repo {
         self.inner.to_thread_local().is_bare()
     }
 
+    /// Whether this repository currently has a shallow history boundary.
+    pub fn is_shallow(&self) -> bool {
+        self.inner.to_thread_local().is_shallow()
+    }
+
     /// Where `HEAD` currently points.
     pub fn head(&self) -> ffi::Result<HeadInfo, GixError> {
         let repo = self.inner.to_thread_local();
@@ -653,6 +660,26 @@ impl Repo {
         match commit_from_revision(&repo, &revision).and_then(commit_record) {
             Ok(commit) => ffi::Ok(commit),
             Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Return whether a valid object id exists in this repository.
+    ///
+    /// Malformed ids and ids for a different object format remain errors.
+    pub fn has_object(&self, id: ffi::String) -> ffi::Result<bool, GixError> {
+        let repo = self.inner.to_thread_local();
+        match parse_id_for_repo(&repo, &id) {
+            Ok(id) => ffi::Ok(repo.has_object(id)),
+            Err(err) => ffi::Err(err),
+        }
+    }
+
+    /// Write exact blob bytes and return their content-addressed object id.
+    pub fn write_blob(&self, bytes: ffi::Slice<u8>) -> ffi::Result<ffi::String, GixError> {
+        let repo = self.inner.to_thread_local();
+        match repo.write_blob(bytes.as_slice()) {
+            Ok(id) => ffi::Ok(hex(id.as_ref())),
+            Err(err) => ffi::Err(other(&err)),
         }
     }
 
@@ -976,6 +1003,31 @@ impl Repo {
         }
     }
 
+    /// Return a read-only unified diff: 0 = HEAD/index, 1 = index/worktree,
+    /// 2 = HEAD/worktree including non-ignored untracked files.
+    pub fn diff(&self, target: u32, pathspecs: ffi::Slice<u8>) -> ffi::Result<DiffRecord, GixError> {
+        let repo = self.inner.to_thread_local();
+        match diff::collect(&repo, target, pathspecs.as_slice()) {
+            Ok(record) => ffi::Ok(record),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Compare tree-resolving revisions. Empty old_revision denotes the empty tree.
+    /// Pathspecs are NUL-separated raw Git bytes; paths and IDs in results are owned.
+    pub fn tree_changes(
+        &self,
+        old_revision: ffi::String,
+        new_revision: ffi::String,
+        pathspecs: ffi::Slice<u8>,
+    ) -> ffi::Result<ffi::Vec<TreeChangeRecord>, GixError> {
+        let repo = self.inner.to_thread_local();
+        match diff::tree_changes(&repo, old_revision.as_str(), new_revision.as_str(), pathspecs.as_slice()) {
+            Ok(records) => ffi::Ok(records.into()),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
     /// Return repository status with LibGit2.Native-compatible numeric flags.
     ///
     /// `pathspecs` is a NUL-separated list of raw Git pathspec bytes.
@@ -1253,6 +1305,7 @@ pub fn ffi_inventory() -> RustInventory {
         .register(builtins_vec!(BranchRecord))
         .register(builtins_vec!(IndexEntryRecord))
         .register(builtins_vec!(StatusRecord))
+        .register(builtins_vec!(TreeChangeRecord))
         .register(service!(ReferenceLockLease))
         .register(service!(Repo))
         .register(service!(ByteReader))

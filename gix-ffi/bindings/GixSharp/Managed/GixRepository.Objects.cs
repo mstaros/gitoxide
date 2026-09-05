@@ -7,6 +7,27 @@ public sealed partial class GixRepository
     private static readonly Encoding GitTextEncoding =
         new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
 
+    /// <summary>Returns whether the object exists in the repository.</summary>
+    public bool HasObject(GixObjectId objectId) =>
+        Invoke("HasObject", repo =>
+        {
+            using var nativeId = objectId.Value.Utf8();
+            return repo.HasObject(nativeId);
+        });
+
+    /// <summary>Writes the exact bytes of a blob and returns its object ID.</summary>
+    public GixObjectId WriteBlob(byte[] content)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+
+        return Invoke("WriteBlob", repo =>
+        {
+            using var nativeContent = content.Slice();
+            using var nativeId = repo.WriteBlob(nativeContent);
+            return new GixObjectId(nativeId.String);
+        });
+    }
+
     /// <summary>Resolves a revision, peels annotated tags, and returns a complete commit.</summary>
     public GixCommit LookupCommit(string revision)
     {

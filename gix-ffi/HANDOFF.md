@@ -1,17 +1,21 @@
 # gix-ffi / GixSharp — Handoff
 
-State as of 2026-08-25. P0a streaming and implemented-surface union audit
-against `main` at `61739044966d033186908aa4ef25157ff981d7a6` and the local
-Interoptopus `docs/csharp-unions.md` plan.
+Status updated on 2026-09-05. The earlier foundation was verified at
+`b3f28217b0b4310aa6e26782467875bbbfc31c84`; the completed wrapper expansion is
+recorded in transaction `691180980e389df06166ef8f`.
+The completion goal is full public gix coverage, confirmed by the user.
+Use the checkboxes here for boundary work and the implementation checklist in
+`../Issues.md` for method/domain coverage. Historical prototype counts and examples
+below are design context, not current progress totals.
 
 ## What this is
 
 A .NET binding over gitoxide (`gix`) targeting **full gix coverage**.
 
-**Status: proof of concept, both layers present.** The current surface is
-small; what it proves is that the toolchain works and the core ownership and
-marshalling decisions hold. It is the base for systematic expansion, not the
-target surface.
+**Status: implementation in progress.** Both layers work end to end. Six
+initial compatibility slices are complete, with additional gix methods still to
+implement. Full gix coverage includes methods being added to the fork in parallel.
+Independent methods continue while their applicable boundary contracts are completed.
 
 Two distinct layers. Keep the names apart; calling both "the facade" caused
 real confusion:
@@ -22,70 +26,50 @@ gix (path dep, this repo)
   -> interoptopus         generates C# from the facade inventory
   -> Interop.cs           GENERATED, never hand-edited
   -> GixSharp/Managed/    MANAGED LAYER, hand-written
-  -> GixSharp.Tests       TUnit, 15 tests against a real repository
+  -> GixSharp.Tests       TUnit against real repositories and the native DLL
 ```
 
 No cbindgen, no ClangSharp, no hand-written P/Invoke.
 
 ## Current state
 
-Do not trust method counts in this document - the surface moves faster than
-the prose. This section lists **capability areas**; for the exact surface
-read `src/` and `bindings/GixSharp/Managed/`, and `git log` for history.
+- [x] Repository open/discover/init, locations and lifecycle compatibility slice.
+- [x] Objects/commit graph compatibility slice, including commit reads and writes.
+- [x] Status compatibility slice.
+- [x] Index/conflicts compatibility slice.
+- [x] References/branches compatibility slice.
+- [x] Diff/patch/tree-change compatibility slice, with exact-byte snapshots.
+- [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
+- [x] Exhaustive GixError case matching; CS8509 is an error and the missing-case
+  compiler probe and all ten mappings are verified.
+- [x] P0a byte-stream boundary prototype and measurements.
+- [x] Interoptopus C# 15 unions consumed in generated Interop.cs.
+- [x] Fork dependencies select `interoptopus_mps` and `interoptopus_csharp_mps`
+  0.17.1 from registry `local`.
+- [x] Fresh-index status/staging correction integrated at `b3f28217`;
+  retained foundation validation: 31/31 native tests and 54/54 managed tests.
+- [x] Expansion validation: 41/41 native tests; 63/63 managed tests via
+  PatchedCoreRun/corerun.exe, operation `op_15363769012d4c5e`; managed build
+  `op_495d6086de144daa` succeeded.
+- [ ] Complete every remaining public gix capability in the `../Issues.md`
+  implementation checklist, including additions made in parallel.
+- [ ] Complete the remaining boundary, profile and delivery checks below.
 
-Both layers exist and are exercised end to end by TUnit tests running in the
-**main checkout** against a loaded native DLL.
+A checked compatibility slice records its implemented scope; it does not imply
+that the corresponding gix domain is fully wrapped. LibGit2.Native parity and
+CSharpMpc migration are intermediate validation milestones. The final target is
+full gix coverage.
 
-**Working capability areas:**
-
-- repository open, discover, init
-- repository info, git dir, bareness
-- HEAD resolution
-- commit reading, history, ancestry
-- object metadata and tree ids
-- **commit writing** - object creation and commit-from-index
-- index - in progress at time of writing
-
-**Rust facade** - `src/`, split across more than one module. Records plus a
-single coarse error enum `GixError`.
-
-**Managed layer** - `bindings/GixSharp/Managed/`, a partial `GixRepository`
-across several files, with records `GixHead`, `GixCommitInfo`, `GixCommit`,
-`GixObjectId`, `GixObjectMetadata`, `RepositoryInfo`, and `GixException` +
-`GixErrorKind`.
-
-The managed layer closes the traps the POC exposed: managed `string` in and
-out, no generated resource escapes, results outlive the repository,
-`Dispose` is idempotent and guards further use, native errors become typed
-`GixException`. Reviewed 2026-08-24: no bugs found.
-
-**Writes are now in scope.** This is no longer a read-only binding.
-`create_commit_object` and `create_commit_from_index` fail in ways a caller
-must act on - lock contention, non-fast-forward, missing parent, conflicted
-index. Read paths tolerated a coarse error type; write paths do not. This is
-the main reason P0b has moved ahead of cursor work.
-
-For scale only, `gix` has 727 `pub fn` in `gix/src`. The eventual FFI
-surface will not map 1:1 to those, because builders, iterators, callbacks,
-transactions and borrowed views all need ABI-specific shapes. **The target
-is full coverage.**
-
-Early commits, for orientation only - use `git log` for the real history:
-
-| Commit | What |
-|---|---|
-| `bbd8da04a` | facade crate, `repo_open` |
-| `828a1e197` | GixSharp + Tests projects, byte-based paths |
-| `a200a90e1` | `head`, `rev_walk`, `commit_info` |
-| `d778a55e7` | `.gitattributes`, LF normalisation |
-
+For exact methods, read `src/` and `bindings/GixSharp/Managed/`. Keep generated
+resources out of managed signatures, preserve Git bytes and managed result
+lifetimes, and pair each native addition with its wrapper and validation.
 
 ## Layout
 
 ```
 gix-ffi/
   Cargo.toml            own [workspace] - NOT a gitoxide workspace member
-  .cargo/config.toml    GITIGNORED, machine-local, required (see Traps)
+  .cargo/config.toml    legacy machine-local overrides; no fork path patch required
   .gitattributes        forces LF; generator emits LF, autocrlf rewrites it
   .gitignore            *.sln ignored, GixSharp.slnx deliberately NOT
   src/                  the Rust facade, split across modules
@@ -184,25 +168,22 @@ artifact.
 
 ## Traps - each of these cost real time
 
-**`.cargo/config.toml` is gitignored and does NOT follow into a new
-worktree.** Without it the build silently resolves `interoptopus_csharp`
-from crates.io instead of the local checkout, the generated `Vec<T>` loses
-`AsSpan()`/`ToArray()`, and the failure appears as
-`CS0411 ImmutableArrayExtensions.ToArray<T> cannot be inferred` - naming
-nothing relevant. **Every new worktree needs a copy.** Issue `f7bf7635`.
+**The fork is selected by distinct registry package names.** Since `c68796bb`,
+`gix-ffi/Cargo.toml` requests `interoptopus_mps` and
+`interoptopus_csharp_mps` 0.17.1 from registry `local`. Configure that existing
+registry under CARGO_HOME on the build machine. A transaction worktree does not
+need a copied crates.io path-patch config; the old silent-substitution issues
+`f7bf7635` and `0be88a6a` are resolved by the manifest change.
 
-**Fixing the config is not sufficient.** `Interop.cs` will already have been
-regenerated wrong, and `cargo build` does NOT regenerate it - only
-`cargo test --test generate_bindings` does.
+**Building does not regenerate Interop.cs.** Run the `generate_bindings` test,
+then build and execute the managed consumer. A generated diff can be an intentional
+inventory/generator change; review it rather than interpreting every diff as an
+upstream downgrade.
 
-**Every `ffi::Vec<T>` needs its own `builtins_vec!(T)`.** Without it the
-backend emits *references* to `VecByte` / `VecUtf8String` but never the
-type. Rust compiles clean; only `csc` catches it. Bit twice. The macro takes
-the element type, unlike `builtins_string!()`. Issue `2a6da76a`.
-
-This becomes infrastructure-level correctness once batched structured
-streaming starts using `ffi::Vec<T>` pervasively. The missing-registration
-validation should be fixed rather than relying on C# compilation to catch it.
+**Each ffi::Vec<T> still needs builtins_vec!(T).** The C# backend now explicitly
+rejects missing Vec and Utf8String helpers; Interoptopus issue `2a6da76a` is closed.
+This is backend generation validation, not a new rule in core
+`RustInventory::validate()`.
 
 **`Utf8String` arguments are MOVED, not borrowed.** The marshaller calls
 `IntoUnmanaged()`, transferring the pointer and nulling the managed side, so
@@ -213,7 +194,7 @@ generated types into public signatures.
 **Generated ownership is per type, not universal.** Owned generated resources such
 as `Utf8String`, `VecByte`, `VecUtf8String`, `GixError` and the current
 `Result*` wrappers are `IDisposable`; scalar generated types such as
-`FfiObjectType` are not. Under the planned union projection, nested `*Case`
+`FfiObjectType` are not. Under the implemented union projection, nested `*Case`
 record structs are case views/values, not separately-owned copies of an enum's
 payload. Dispose the owning generated enum/result according to its generated
 contract and do not infer that a matched case should be disposed independently.
@@ -283,7 +264,7 @@ contention remains after streaming is in place, an interlocked call-counter
 (the pattern uniffi's generated wrapper uses) keeps dispose safety without
 serialising unrelated calls.
 
-## P0 - boundary contracts before breadth
+## P0 - boundary contracts for affected API families
 
 Full coverage has three high-coupling boundary decisions. **P0a byte streaming
 is now experimentally resolved**; its selected pull/lifetime contract constrains
@@ -622,127 +603,69 @@ Release validation needs three independent gates:
 projection correctness. Conversely, managed SemVer does not require keeping old
 native/generated layouts alive. Keeping those boundaries separate is what makes
 hundreds of future FFI additions tractable.
-### Interoptopus enum / C# 15 union dependency - partially landed
+### Interoptopus enum / C# 15 union dependency
 
-Steps 0, 1 and 2 of the Interoptopus `docs/csharp-unions.md` plan are landed, and so is the
-first piece of Step 3. GixSharp is blocked on the rest of Steps 3-5. Earlier revisions of this
-section said "plan, not approved" with Step 0 blocking - that quoted the plan's own header,
-which was stale and has since been corrected.
+The union projection in `interoptopus/docs/csharp-unions.md` is complete and is
+already consumed by GixSharp. The remaining rich-variant work has its own plan.
 
-Landed:
+- [x] Correct discriminants and collision-safe generated names.
+- [x] net11 / LangVersion=preview targeting.
+- [x] Public nested case types and single-case constructors, [Union] and IUnion.
+- [x] Value, HasValue and TryGetValue with consistent empty-state behavior.
+- [x] Reject default struct unions and null class unions when marshalled out;
+  validate native tags during conversion.
+- [x] Project Option and Result carriers, including their accessor/factory
+  integration and executed generated-consumer tests.
+- [x] Snapshot/builtin-helper/naming issues `ccb105a2`, `2a6da76a`,
+  `09b82d44`, `4e9a17c3` and `7c8cb22e` are closed.
+- [x] Interoptopus named/multi-field Step 1: derived Payload/payloads accessors.
+- [ ] Complete named/multi-field Steps 2–5 in
+  `interoptopus/docs/csharp-multi-field-variants.md` before exposing API shapes
+  that require those variants.
+- [ ] Complete the remaining GixSharp public-surface and semantic-error adoption
+  checks below.
 
-- **Correct discriminants** (`c928d53e`). `tag` is a field on `Variant`, unconditional and
-  independent of payload shape; `VariantKind` is `Unit` / `Tuple(TypeId)`, a pure payload
-  descriptor. The proc macro resumes implicit discriminants across payload variants, and the
-  three sites that substituted the positional index are fixed. `Issues.md` `09b82d44` closed.
-  The API hash changed, so bindings must be regenerated.
-- **Collision-safe naming.** A `union_names` model pass resolves a `stem` and a `case_type` per
-  variant, preservation-biased: existing emitted names are kept and only new case types move on
-  collision. Reference-project output was byte-identical.
-- **net11 / `LangVersion=preview` retarget** (`9d664613`).
-- **Struct-backed `_hasValue`** (`8c70868d`) - plan item 3. The field is emitted but nothing
-  reads it yet, so it currently trips **CS0169: never used** on every carrier.
+The generated custom [Union] representation retains the native tag/payload ABI.
+Its explicit managed empty-state policy distinguishes unconstructed structs from
+actual Rust variants. Case values remain views of their owning generated resource;
+dispose the owner according to its contract. Unit-only enums may remain plain C#
+enums. Generated case types are implementation details of the GixSharp boundary.
 
-Still pending, and the actual blocker: items 3a-3f (class constructor, nested case types,
-`Value`/`HasValue`/`TryGetValue`, `[Union]` + `IUnion`, case conversions, case accessibility),
-item 4 (empty-state guards, validated `ToManaged`, exception split), and item 5 (snapshots move
-once; the consumer projects compile the output).
+Use the user's .NET 11 preview 7 / C# 15 patched runtime and
+`D:/repos/Unions/src/Unions/UnionSpecification.md` as the current environment.
+The native API guard does not validate C# projection semantics; verify both
+generation and the real managed consumer.
 
-**Regenerating against the current fork today is not neutral.** `_hasValue` is already emitted,
-so a regenerated `Interop.cs` gains an unused field on every struct-backed generated enum and
-`Result` carrier, each raising CS0169. Check whether `GixSharp.csproj` or `Directory.Build.props`
-sets `TreatWarningsAsErrors` before pinning forward - if it does, the build breaks on a
-half-implemented feature. The warnings clear when item 3c lands and consumes the field. Waiting
-for 3c is the cheaper option; there is nothing in the interim state GixSharp needs.
+Ordinary supported methods continue in parallel. A rich-enum requirement gates its
+own final ABI shape; do not introduce a temporary competing sum-type design.
 
-The parts GixSharp relies on:
-
-- **Custom `[Union]`, not the C# `union` keyword.** The backend keeps the existing managed
-  tag/payload storage and native `Unmanaged` layout, adding union behaviour on top. The native
-  ABI stays unchanged.
-- **Default/invalid state is managed-only.** Struct-backed generated enums carry a managed
-  `_hasValue` bit; `default(E)` is empty and cannot be marshalled to Rust. Class-backed enums
-  have no empty non-null instance. Unknown native tags remain interop corruption and must fail
-  during conversion.
-- **There is no opt-in flag.** `RustLibraryBuilder::unions(bool)` was designed and then dropped:
-  the fork targets net11 everywhere and unions are the default `DataEnum` projection. There is
-  no eligibility gate and no flag-off output to preserve. Adoption is "pin the revision and
-  regenerate", not "enable a switch".
-- **Scope is every `DataEnum`, including the `Option` / `Result` carriers.** They carry a
-  `DataEnum` inside a `TypePattern` and the Step 3/4 machinery is generic, so they are projected
-  in the same pass - `8c70868d` demonstrates it by emitting `_hasValue` on `ResultVoidError`,
-  `ResultVec3f32Error` and `ResultUintDotnetException`. What is deferred is only
-  `Result`-specific tidying: `IResult<T,E>` coexistence with case types, `AsOk` / `AsErr`,
-  `body_from_call` factory names. Earlier revisions described the projection itself as deferred;
-  that was wrong and sent the adoption plan down a wrong path.
-- **Generated cases are output-only.** Nested case types stay with the parent generated enum,
-  have no FFI `TypeId` - verified against the Interoptopus output router, which classifies only
-  registered `TypeId`s - and remain internal under rule 8. Do not expose them from public
-  GixSharp signatures.
-- **Two consequences are breaking and land together.** External `new EnumX()` stops compiling
-  for class-backed generated enums, and `default(ResultX)` becomes empty rather than `Ok`, so
-  `AsOk()` on a default `Result` throws the empty-state exception instead of surfacing as
-  `EnumException<E>`. Neither is currently relied on by hand-written `Managed/` code, but that
-  is a property of today's consumer, not a guarantee - verify both when regenerating.
-
-Two Interoptopus questions remain open and touch the generated shape GixSharp will consume:
-what accessibility nested case types get, and whether the compiler synthesises the case-to-enum
-conversion from `[Union]` or the generator must emit operators. Neither changes the adoption
-sequence.
-
-**Unrelated Interoptopus changes that moved the shared checkout.** The fork removed Git LFS
-entirely, stopped committing its plugin DLLs (they are built during `cargo test` by
-`define_plugin!`), and fixed CI to install the .NET 11 preview SDK on every OS rather than only
-Linux. None of this changes the generated bindings, but the local checkout at
-`C:/Users/mstar/source/repos/interoptopus` now requires a .NET 11 preview SDK to run its own
-tests, and `Issues.md` `1383b84b` (MCP transactions blocked by the LFS clean-filter bypass) is
-closed as a side effect.
-
-GixSharp will still **wait rather than create a temporary competing sum-type layer**. If a
-planned API naturally wants a closed data enum but would currently require representation
-boilerplate solely because of Interoptopus limitations, defer that final ABI shape until the
-relevant generic support exists. Named and multi-field Rust variants are still unsupported and
-explicitly out of scope for this projection - see the note under P0b.
-
-`guard!(ffi_inventory)` does not validate C# projection quality when the Rust inventory is
-unchanged. Union projection deliberately changes generated managed source while preserving the
-native ABI/hash. Two independent checks are therefore required: the normal native API guard,
-plus a pinned Interoptopus revision compiled under the exact .NET 11 / C# 15 preview toolchain.
-Interoptopus owns the compiler-facing union tests; GixSharp needs only to verify that its
-generated bindings and hand-written translation compile and behave against the pinned fork.
-
-
-### Existing implementation migration when unions land
+### Existing implementation migration checklist and design
 
 The existing POC has been audited against the planned union projection so this
 is not only guidance for future APIs. The migration is intentionally split by
 the Interoptopus rollout boundary and by whether the affected shape is generated
 implementation detail or already-public GixSharp API.
 
-**Current plain `DataEnum` inventory is only two types:**
+Generated unions are already adopted. The detailed migration rationale below
+retains the earlier POC examples; use current source for the inventory and the
+checkboxes for unfinished work.
 
-- `FfiObjectType` is a unit-only, struct-backed data enum used inside
-  `ObjectMetadata`;
-- `GixError` is the class-backed seven-case payload enum used as the error side
-  of every current `ffi::Result<_, GixError>`.
+- [x] Regenerate GixSharp against the fork's completed union projection.
+- [x] Replace the non-exhaustive GixError property-pattern mapper with generated
+  case-type matching; validate missing-case compiler errors and managed ownership.
+- [ ] Extend the managed public-signature invariant beyond its fixed top-level
+  resource set to all public shapes and nested generated case types.
+- [ ] Implement the semantic error envelope and actionable recovery detail.
+- [ ] Redesign HEAD state after the required named/multi-field support is ready.
+- [ ] Complete remaining internal Option/Result cleanup while preserving the
+  public managed nullable/exception contracts.
 
-There is currently **no `ffi::Option<T>` in the gix-ffi surface**. `ffi::Result`
-is already pervasive, but its generated union projection is explicitly a later
-Interoptopus phase and must not be conflated with the first plain-`DataEnum`
-rollout.
+#### Historical union-adoption recipe
 
-The hand-written managed layer does not construct `GixError`, `FfiObjectType`
-or any generated `Result*` wrapper directly. Today `default(FfiObjectType)` is
-indistinguishable from its tag-zero `Commit` case in generated checks, but no
-hand-written GixSharp code relies on that behavior; `ReadObjectType` receives it
-from native `ObjectMetadata`. Likewise, generated Result construction and
-`.AsOk()` calls live in `Interop.cs`, not `Managed/`. The planned stricter
-empty/default and class-construction semantics are therefore generator migration
-concerns for the current surface, not public GixSharp source breaks.
+The generation dependency in this earlier recipe is complete. Its inventory counts
+are historical, and the checkbox list above supersedes its migration sequencing;
+in particular, exhaustive GixError case matching is now implemented and validated.
 
-#### Union adoption - immediate internal migration
-
-When Interoptopus Steps 3-5 are green:
 
 1. **Pin the revision and regenerate. There is no switch to enable.**
    `tests/generate_bindings.rs` builds `RustLibrary`; unions are the default
@@ -913,133 +836,62 @@ GixSharp sum-type design question. The remaining open questions are:
 | **P1** | **Stateful resources / transactions** | Index editing, refs/config transactions, worktree mutation, writers/editors and reusable diff caches need explicit ownership, service-vs-method boundaries, disposal and commit/rollback rules. This can be designed per affected API family rather than changing every existing operation. |
 | **P2** | **Callbacks, progress, cancellation, credentials** | Network and long-running operations need a single policy for managed callbacks, worker-thread invocation, reentrancy, cancellation and managed-exception propagation. Managed callbacks should not become the default record- or byte-stream transport merely because Interoptopus supports them. |
 | **P3** | **Filesystem paths vs Git bytes** | Git names/messages remain byte-faithful. OS filesystem paths need a separate platform-faithful representation and conversion policy. |
-| **P4** | **Interoptopus supportability** | The current fork still has no cursor/stream primitive, snapshot baseline issue `ccb105a2` gates template review, and `docs/csharp-unions.md` still marks the discriminant fix as blocking/not approved. Consume those generic fixes rather than duplicating them in GixSharp, then prove gix-specific cursor shapes before promoting any additional generic Interoptopus abstraction. |
+| **P4** | **Interoptopus supportability** | Union projection, snapshot and helper-validation fixes are complete. Finish the named/multi-field variant plan; prove gix-specific cursor shapes before promoting any additional generic abstraction. |
 
 
-## Next step
+## Remaining work
 
-The managed layer is done for the POC surface, issue `99208883` is effectively
-closed, and **P0a is now closed at the boundary-contract level** by
-`61739044966d033186908aa4ef25157ff981d7a6`. Do not repeat the byte-stream
-prototype as prerequisite work and do not resume broad surface expansion yet.
-The remaining high-coupling work is:
+Continue independent method implementation in parallel with the boundary work.
+Use `../Issues.md` as the method/domain checklist; update and commit each completed
+slice with its validation evidence.
 
-1. **Consume the Interoptopus union work instead of building a GixSharp
-   workaround.** Its Steps 0 (discriminants), 1 (collision-safe naming) and 2
-   (net11/preview retarget) are landed; what remains is Steps 3-5 - the managed
-   representation, conversion correctness, and the validation that the retargeted
-   consumer projects compile the output. There is no builder flag: unions are the
-   default generated `DataEnum` representation in this fork. Pin that revision and
-   regenerate `bindings/Interop.cs`. In the same adoption transaction, audit the
-   generated `Result*` / `.AsOk()` paths - `Result` carriers are projected in this
-   pass, not a later one - and strengthen the managed-signature reflection
-   invariant to catch nested generated case types before regenerating. Do **not**
-   do a standalone rewrite of the coarse `GixError` translation; fold it into P0b.
-2. **P0b error ABI:** with the generator prerequisite available, implement the
-   semantic envelope, freeze `Kind` categories and the extensible `Code`
-   convention, expose retryability separately, and model only actionable
-   recovery detail as an internal closed data enum. Preserve one public
-   `GixException`. Include `Unsupported` as the defensive native representation
-   of a missing build capability, while the managed layer preflights known
-   absence as `NotSupportedException`. Replace the current coarse
-   `EnumException<GixError>` translation here rather than modernising it twice.
-   Add tests for object-kind mismatch, conflicted index, empty-commit refusal,
-   reference lock contention and reference-out-of-date; no test or managed
-   branch should parse diagnostics.
+- [x] Consume the completed Interoptopus union projection.
+- [x] Complete P0a byte-stream boundary experiments; do not repeat them as a prerequisite.
+- [ ] Finish the named/multi-field variant migration where required by closed
+  recovery-detail and HEAD-state shapes.
+- [ ] Implement P0b: one GixException, semantic Kind, extensible ASCII Code,
+  independent retryability and actionable typed detail. Cover object-kind
+  mismatch, conflicted index, empty-commit refusal, reference lock contention
+  and out-of-date references without parsing diagnostic messages.
+- [ ] Implement P0c: bounded batched cursors, final/error outcomes, single-consumer
+  behavior and ownership-closure enforcement. Preserve existing materializing
+  conveniences over streaming where needed.
+- [ ] Establish a managed public-API baseline and complete the public-signature
+  leakage checks.
+- [ ] Implement explicit native profiles with both hash algorithms, runtime
+  capabilities and inventory/API-guard equivalence across released engines.
+- [ ] Generalize RID staging and verify clean package consumption on supported
+  platforms before marking profile/network delivery complete.
+- [ ] Replace the documented HEAD sentinel shape with the closed model once the
+  required rich variants are available; validate born/unborn/detached behavior.
+- [ ] Complete per-family stateful ownership, disposal and commit/rollback rules.
+- [ ] Complete callback, progress, cancellation, credential and filesystem-path
+  contracts for APIs that need them.
+- [ ] Promote the internal byte-reader prototype to the intended public
+  object/worktree stream and archive coverage.
+- [ ] Finish all public gix coverage and validate the CSharpMpc consumer migration.
 
-   **Typed recovery detail hits a generator ceiling.** Interoptopus models unit
-   variants and single-payload tuple variants only; named and multi-field Rust
-   variants are explicitly out of scope for this projection. The two detail shapes
-   P0b needs - reference conflict (name, expected, actual) and object-kind
-   mismatch (id, expected kind, actual kind) - are three-field variants. So either
-   ship the envelope (`Kind`, `Code`, retryability, message) now and defer only the
-   typed detail, or accept a payload record per case *deliberately*, on the grounds
-   that the record is a real domain object rather than a workaround. Decide which
-   before starting; do not discover it mid-implementation.
-3. **P0c structured cursors:** with the proven P0a reader lifecycle and P0b error
-   semantics fixed, replace the native eager `rev_walk` precedent with a
-   bounded-batch cursor and exercise the same managed contract against `dirwalk`
-   or `status`. Keep the existing managed `RevWalk(...)` as a materialising
-   convenience over the streaming implementation. Use Rust data enums for
-   genuinely closed item/outcome states where appropriate; do not invent
-   nullable-field bags.
-4. add automated ownership-closure enforcement for stream/cursor payloads.
-5. **Install compatibility/profile infrastructure before breadth accelerates:**
-   make the shared gix feature set explicit with both hash algorithms; add the
-   runtime capability bootstrap; establish the managed public-API baseline and
-   record the `GixHead` sum-type redesign as a known approved pre-1.0 break;
-   add the pinned-generator/exact-toolchain compile gate; and add a
-   profile-equivalence validation requiring every released native engine to
-   produce the same Interoptopus inventory/API-guard hash. The second physical
-   native engine and generalized RID staging must exist before the first
-   profile-specific/network surface is considered complete.
-6. **Remove the known public sentinel sum type before API stabilization:** once
-   the needed generic rich-enum support is available, replace `HeadInfo`'s
-   target/referent/boolean encoding and the public positional `GixHead` record
-   with the closed HEAD-state model described above. Note that
-   `SymbolicResolved(reference, id)` is itself a two-field variant and therefore
-   also depends on the ceiling described under P0b. Treat the baseline change
-   as intentional, update the existing born/unborn/detached tests in the same
-   transaction, then approve the new public baseline. Do not use this as a
-   reason to convert ordinary scalar enums or flags to unions. The later
-   `ffi::Option` and `ffi::Result` migrations remain internal cleanup checkpoints
-   and preserve their already-correct public nullable/exception contracts.
-7. **P1 stateful resources:** settle service-vs-method ownership plus
-   commit/rollback/disposal rules before expanding index/ref/config/worktree
-   mutation families.
-8. then resume breadth module by module, pairing each Rust facade addition with
-   its managed wrapper and tests and keeping rules 8-11 green.
+## Other tracked work
 
-The target remains **full gix coverage**: the managed/FFI surface represents
-the union of the declared native-profile capabilities, not one impossible
-all-features binary. Small bounded materialisation may still be selected
-locally when it is demonstrably the right API shape, but it is an optimisation
-decision, not the architecture for iteration or bulk data.
-
-
-
-## Also outstanding
-
-- Issue `f7bf7635`: `build.rs` asserting the pinned local Interoptopus patch is
-  active.
-- Interoptopus `docs/csharp-unions.md`: Steps 0-2 landed; **Steps 3-5 are the
-  blocker.** GixSharp intentionally waits for this generic work rather than
-  creating a parallel wrapper-enum architecture. Earlier revisions of this list
-  said the plan was "not approved" with Step 0 blocking; that quoted a stale
-  header and is corrected.
-- Interoptopus snapshot baseline issue `ccb105a2`: open, **low severity** - one
-  snapshot awaiting `cargo insta review` for an unrelated template change. The
-  earlier "29 of 33 failing" reading was retracted as a Git LFS materialization
-  failure. It does not gate template work.
-- The union projection needs a net11 / `LangVersion=preview` generated-C# compile
-  check, because the projection preserves the native ABI and hash and the API
-  guard therefore cannot see it. Interoptopus satisfies this through its own
-  retargeted `Bindings`, `Tests` and plugin projects; GixSharp still needs its own
-  equivalent over regenerated `Interop.cs`.
-- The existing Interoptopus `validate()` fix (`2a6da76a`) and `Vec<T>` accessors
-  remain local-fork dependencies until their upstream/fork disposition is
-  settled. `1383b84b` (MCP transactions vs LFS) and `7c8cb22e` are also open.
-- `ffi::Option` / `ffi::Result` **projection is not deferred** - their `DataEnum`
-  carriers go through the same pass. What is deferred is `Result`-specific tidying
-  (`IResult<T,E>` coexistence, `AsOk`/`AsErr`, `body_from_call` factory names).
-  Keep GixSharp's public managed result/error translation independent of that
-  generated ergonomics so it can converge later without a public API break.
-- There is currently no `ffi::Option` in the gix-ffi surface, so the `has_* +
-  payload` and empty-value sentinel shapes remain future internal FFI cleanup.
-- Parked, unrelated to the bridge: `gix-ref` reflog creates directories and
-  an empty file BEFORE validating the committer, leaving debris on a pure
-  validation failure. `gix-ref/src/store/file/loose/reflog.rs` ~119-153.
-
+- [x] Resolve local-patch substitution by selecting distinct 0.17.1 fork packages
+  from registry `local`; no build.rs path-patch check is needed.
+- [x] Close the Interoptopus snapshot/helper/naming and Git LFS transaction issues;
+  their historical descriptions are retained in that fork's Issues.md.
+- [ ] Add the documented plain-outcome-enum coverage check; unions and plain enums
+  require different checks.
+- [ ] Resolve the remaining reference-lock recovery, guarded symbolic-ref and
+  fixture/platform issues in `../Issues.md`.
+- [ ] Reassess the separately parked reflog pre-validation filesystem side effect
+  before treating that core issue as fixed.
 
 ## Environment
 
 - Windows, `core.autocrlf` on; `gix-ffi/.gitattributes` forces LF here.
 - `core.longpaths true` is set; gitoxide's own fixtures still hit MAX_PATH
   in long transaction worktrees.
-- interoptopus 0.16.4, local checkout at
-  `C:/Users/mstar/source/repos/interoptopus`, fork `mstaros/interoptopus`.
-  The `Vec<T>` accessors exist only there, not on crates.io.
-- .NET 11 preview, `LangVersion=preview`, `EnablePreviewFeatures`,
+- interoptopus fork at `D:/repos/interoptopus`, consumed as `_mps` packages
+  version 0.17.1 from the existing machine-configured registry `local`.
+- .NET 11 preview 7 with the patched runtime, C# 15, `LangVersion=preview`, `EnablePreviewFeatures`,
   `runtime-async=on`, TUnit 1.36.0 - matching `CSharpMpc.Server`.
 - `CSharpEditor:build_diagnostics` does not accept `.slnx`; point it at a
   `.csproj`.
@@ -1048,7 +900,7 @@ decision, not the architecture for iteration or bulk data.
 
 ```powershell
 # regenerate bindings (the ONLY way to refresh Interop.cs)
-cd C:\Users\mstar\source\repos\gitoxide\gix-ffi
+cd D:\repos\gitoxide\gix-ffi
 cargo test --test generate_bindings
 
 # build + run the C# tests (dotnet build drives cargo build)
@@ -1056,6 +908,6 @@ cd bindings\GixSharp.Tests
 dotnet run
 ```
 
-A clean `git diff --stat bindings/Interop.cs` after regenerating confirms
-the local interoptopus patch is active. A diff means it is not, and the
-bindings have just been silently downgraded.
+After regeneration, review the Interop.cs diff and validate the native and managed
+suites. For unchanged source and generator inputs, generation must reproduce the
+committed output; intentional inventory or generator changes require a reviewed update.

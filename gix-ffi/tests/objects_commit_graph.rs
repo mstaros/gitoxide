@@ -126,7 +126,7 @@ fn history(
     .collect()
 }
 
-fn git(root: &std::path::Path, arguments: &[&str]) {
+fn git(root: &std::path::Path, arguments: &[&str]) -> Vec<u8> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
@@ -139,6 +139,86 @@ fn git(root: &std::path::Path, arguments: &[&str]) {
         arguments,
         String::from_utf8_lossy(&output.stderr)
     );
+    output.stdout
+}
+
+#[test]
+fn blob_storage_preserves_bytes_and_exists_in_normal_and_bare_repositories() {
+    for bare in [false, true] {
+        let root = TempDir::new(if bare { "blobs-bare" } else { "blobs-worktree" });
+        let root_path = bytes(&root.0);
+        let repo = ok(Repo::create(ffi::Slice::from_slice(&root_path), bare));
+        assert!(!repo.is_shallow(), "new repositories have complete history");
+        assert!(
+            !ok(repo.has_object(string("1111111111111111111111111111111111111111"))),
+            "an absent object returns false"
+        );
+
+        for content in [b"".as_slice(), b"raw\0\xff\xfe\r\nblob\n".as_slice()] {
+            let blob_id = ok(repo.write_blob(ffi::Slice::from_slice(content)));
+            assert!(
+                ok(repo.has_object(string(&blob_id.as_str().to_ascii_uppercase()))),
+                "the new object is visible on the same repository handle"
+            );
+            let metadata = ok(repo.object_metadata(string(blob_id.as_str())));
+            assert!(matches!(metadata.object_type, FfiObjectType::Blob), "the stored object is a blob");
+            assert_eq!(metadata.size, content.len() as u64, "raw byte length is preserved");
+            assert_eq!(
+                git(&root.0, &["cat-file", "blob", blob_id.as_str()]),
+                content,
+                "Git reads the exact bytes written through the FFI"
+            );
+            let repeated = ok(repo.write_blob(ffi::Slice::from_slice(content)));
+            assert_eq!(repeated.as_str(), blob_id.as_str(), "blob writes are content-addressed");
+        }
+    }
+}
+
+#[test]
+fn object_presence_rejects_invalid_ids() {
+    let (_root, repo, _tree) = new_repo("presence-invalid-id");
+    for invalid in ["not-an-id", "1111", "gggggggggggggggggggggggggggggggggggggggg"] {
+        assert!(
+            matches!(repo.has_object(string(invalid)), ffi::Err(GixError::InvalidId(_))),
+            "malformed IDs remain errors, distinct from valid missing IDs"
+        );
+    }
+    assert!(
+        matches!(
+            repo.has_object(string("1111111111111111111111111111111111111111111111111111111111111111")),
+            ffi::Err(GixError::InvalidId(_))
+        ),
+        "a different object format is rejected"
+    );
+}
+
+#[test]
+fn shallow_status_tracks_real_clone_and_unshallow() {
+    let (source, source_repo, tree) = new_repo("shallow-source");
+    git(&source.0, &["hash-object", "-w", "-t", "tree", "--stdin"]);
+    let first = create_commit(
+        &source_repo, "first", &tree, &[], "HEAD",
+        "A", "a@example.com", 100, 0, "C", "c@example.com", 100, 0,
+    );
+    create_commit(
+        &source_repo, "second", &tree, &[&first], "HEAD",
+        "A", "a@example.com", 200, 0, "C", "c@example.com", 200, 0,
+    );
+    let clone = TempDir::new("shallow-clone");
+    git(
+        &source.0,
+        &[
+            "clone", "--no-local", "--depth", "1",
+            source.0.to_str().expect("temporary path is Unicode"),
+            clone.0.to_str().expect("temporary path is Unicode"),
+        ],
+    );
+    let clone_path = bytes(&clone.0);
+    let clone_repo = ok(Repo::open(ffi::Slice::from_slice(&clone_path)));
+    assert!(!source_repo.is_shallow(), "the source has complete history");
+    assert!(clone_repo.is_shallow(), "a depth-one clone is shallow");
+    git(&clone.0, &["fetch", "--unshallow"]);
+    assert!(!clone_repo.is_shallow(), "the same handle observes a completed unshallow");
 }
 
 #[test]

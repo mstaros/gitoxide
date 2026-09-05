@@ -9,6 +9,67 @@ public sealed class ObjectsCommitGraphTests
         new("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
 
     [Test]
+    public async Task BlobStorage_PreservesBytesInNormalAndBareRepositories()
+    {
+        foreach (var bare in new[] { false, true })
+        {
+            using var fixture = new TempRepository(bare);
+            var repository = fixture.Repository;
+            await Assert.That(repository.IsShallow).IsFalse();
+            await Assert.That(repository.HasObject(EmptyTree)).IsTrue();
+            await Assert.That(repository.HasObject(
+                    new GixObjectId("1111111111111111111111111111111111111111")))
+                .IsFalse();
+
+            foreach (var content in new byte[][] { [], [0, 255, 254, 13, 10, 98, 108, 111, 98, 10] })
+            {
+                var id = repository.WriteBlob(content);
+                await Assert.That(repository.HasObject(id)).IsTrue();
+                await Assert.That(repository.GetObjectMetadata(id))
+                    .IsEqualTo(new GixObjectMetadata(GixObjectType.Blob, content.LongLength));
+                await Assert.That(Git(fixture.Root, "cat-file", "blob", id.Value)
+                        .SequenceEqual(content))
+                    .IsTrue();
+                await Assert.That(repository.WriteBlob(content)).IsEqualTo(id);
+            }
+
+            await Assert.That(() => repository.WriteBlob(null!))
+                .Throws<ArgumentNullException>();
+        }
+    }
+
+    [Test]
+    public async Task IsShallow_TracksCloneAndUnshallowOnTheSameHandle()
+    {
+        using var fixture = new TempRepository();
+        Git(fixture.Root, "hash-object", "-w", "-t", "tree", "--stdin");
+        var first = Commit(fixture.Repository, "first", [], "HEAD", 100);
+        Commit(fixture.Repository, "second", [first], "HEAD", 200);
+        var clonePath = Path.Combine(fixture.Root, "shallow-clone");
+        Git(fixture.Root, "clone", "--no-local", "--depth", "1", fixture.Root, clonePath);
+
+        using var clone = GixRepository.Open(clonePath);
+        await Assert.That(fixture.Repository.IsShallow).IsFalse();
+        await Assert.That(clone.IsShallow).IsTrue();
+        Git(clonePath, "fetch", "--unshallow");
+        await Assert.That(clone.IsShallow).IsFalse();
+    }
+
+    [Test]
+    public async Task ObjectStorageAndShallowState_RejectDisposedHandles()
+    {
+        using var fixture = new TempRepository();
+        fixture.Repository.Dispose();
+
+        await Assert.That(() => fixture.Repository.HasObject(EmptyTree))
+            .Throws<ObjectDisposedException>();
+        await Assert.That(() => fixture.Repository.WriteBlob([]))
+            .Throws<ObjectDisposedException>();
+        await Assert.That(() => fixture.Repository.IsShallow)
+            .Throws<ObjectDisposedException>();
+    }
+
+    [Test]
     public async Task ObjectIds_ValidateSha1AndNormalizeHex()
     {
         var uppercase = new GixObjectId("ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD");
@@ -354,10 +415,11 @@ public sealed class ObjectsCommitGraphTests
         throw new InvalidOperationException("Expected a GixException.");
     }
 
-    private static void Git(string repository, params string[] arguments)
+    private static byte[] Git(string repository, params string[] arguments)
     {
         var startInfo = new ProcessStartInfo("git")
         {
+            RedirectStandardInput = true,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
             UseShellExecute = false,
@@ -369,25 +431,28 @@ public sealed class ObjectsCommitGraphTests
 
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start git.");
-        var standardOutput = process.StandardOutput.ReadToEnd();
+        process.StandardInput.Close();
+        using var standardOutput = new MemoryStream();
+        process.StandardOutput.BaseStream.CopyTo(standardOutput);
         var standardError = process.StandardError.ReadToEnd();
         process.WaitForExit();
 
         if (process.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"git {string.Join(' ', arguments)} failed: {standardError}{standardOutput}");
+                $"git {string.Join(' ', arguments)} failed: {standardError}");
         }
+        return standardOutput.ToArray();
     }
 
     private sealed class TempRepository : IDisposable
     {
         private readonly DirectoryInfo _parent = Directory.CreateTempSubdirectory();
 
-        public TempRepository()
+        public TempRepository(bool bare = false)
         {
             Root = Path.Combine(_parent.FullName, "repository");
-            Repository = GixRepository.Init(Root);
+            Repository = GixRepository.Init(Root, bare);
         }
 
         public string Root { get; }
