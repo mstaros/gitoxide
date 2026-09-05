@@ -271,7 +271,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [x] `Repository::write_blob` → `GixRepository.WriteBlob(byte[])`; exact bytes, empty blobs, normal/bare repositories and managed disposal tested.
 - [ ] Blob writes from a stream — `repository/object.rs::write_blob_stream`.
 - [ ] Tree entry lookup, traversal and editing — `object/tree/{mod,traverse,editor}.rs`.
-- [ ] Annotated tag creation, reading and peeling — `repository/reference.rs`, `object/tag.rs`.
+- [x] Annotated and lightweight tag creation, owned reads and peeling — `repository/reference.rs`, `object/tag.rs`, `object/peel.rs` → CreateAnnotatedTag, CreateTagReference, ReadTag and PeelTags; transaction `b1cbb5ba3e7ab5b6b96985a2`. Exact names/messages/tagger bytes and extracted signature armor are owned; optional taggers, nested tags/all target kinds, concurrent creation, force/ref locks, malformed objects and Windows path preflight are compared with Git. Signature extraction does not verify authenticity.
 - [ ] General revision resolution, merge-base variants and revision-walk controls — `repository/revision.rs`, `revision/walk.rs`.
 - [ ] Commit description and signature access/signing/verification — `object/commit.rs`, `commit/mod.rs`.
 - [ ] Full status change details, rewrites/copies, statistics, submodules, caller-selected head/index, iteration, cancellation and writeback outcomes — `status/{platform,index_worktree}.rs`, `status/iter/types.rs`.
@@ -307,7 +307,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Complete CSharpMpc consumer migration and its full tests — issue `2c6f1a0f`.
 - [ ] Full gix coverage: every public capability accounted for, implemented through the managed boundary, validated, integrated and checked above.
 
-Latest validated expansion on 2026-09-05: configuration transaction `d461153e562eea7ec0b754bb`, gix-ffi 66/66 native tests (`44573d676596122f55e49dc04bd22592`) and GixSharp 82/82 managed tests. Managed build `op_d044f50e2bc94ac4` and patched-runtime run `op_d83d8f99218340ad` succeeded. Notes integrated as `ee8ffcb7` with 57 native and 76 managed tests; shallow `24b9b9e9` passed 50 native and 71 managed; ignore/local-exclude `c051d784` passed 47 native and 68 managed; diff/scalar `22c1da14` passed 41 native and 63 managed. These totals are validation evidence, not a coverage percentage.
+Latest validated expansion on 2026-09-05: tags transaction `b1cbb5ba3e7ab5b6b96985a2`, based on managed-boundary commit `e37f298c0385380efff932c3070b722ba631b6fe`, passed 75/75 gix-ffi native tests (`cbeca59bb68a65f7ff9bddd905aa2867`) and 92/92 GixSharp managed tests via patched corerun (`op_349b35f8b2b941a4`); managed build `op_2faa924be8b04d77` succeeded. This includes all 9 native and 6 managed tag tests and the whole-public-surface boundary checks. The preceding boundary slice passed 66 native and 86 managed; configuration passed 66/82, notes 57/76, shallow 50/71, ignore/local-exclude 47/68 and diff/scalar 41/63. These totals are validation evidence, not a coverage percentage.
 
 ## Sequencing evidence
 
