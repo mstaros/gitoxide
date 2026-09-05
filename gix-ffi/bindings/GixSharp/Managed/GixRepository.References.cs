@@ -2,6 +2,17 @@ using System.Text;
 
 namespace GixSharp;
 
+/// <summary>The result of a guarded direct-reference update.</summary>
+public enum ReferenceUpdateOutcome : byte
+{
+    /// <summary>The expected target matched and the update was applied.</summary>
+    Applied = 0,
+    /// <summary>The reference changed; reread it before retrying.</summary>
+    Mismatch = 1,
+    /// <summary>The reference does not exist.</summary>
+    Absent = 2,
+}
+
 public sealed partial class GixRepository
 {
     private static readonly UTF8Encoding ReferenceEncoding =
@@ -167,10 +178,10 @@ public sealed partial class GixRepository
             using var nativeName = nameBytes.Slice();
             using var nativeTarget = target.Value.Utf8();
             using var nativeExpected = expected.Value.Utf8();
-            return repo.CompareExchangeReference(
+            return ReadReferenceUpdateOutcome(repo.CompareExchangeReference(
                 nativeName,
                 nativeTarget,
-                nativeExpected);
+                nativeExpected));
         });
     }
 
@@ -186,7 +197,7 @@ public sealed partial class GixRepository
         {
             using var nativeName = nameBytes.Slice();
             using var nativeExpected = expected.Value.Utf8();
-            return repo.DeleteReference(nativeName, nativeExpected);
+            return ReadReferenceUpdateOutcome(repo.DeleteReference(nativeName, nativeExpected));
         });
     }
 
@@ -208,6 +219,15 @@ public sealed partial class GixRepository
                     nativeNames));
         });
     }
+
+    private static ReferenceUpdateOutcome ReadReferenceUpdateOutcome(
+        Native.ReferenceUpdateOutcome outcome) => outcome switch
+    {
+        Native.ReferenceUpdateOutcome.Applied => ReferenceUpdateOutcome.Applied,
+        Native.ReferenceUpdateOutcome.Mismatch => ReferenceUpdateOutcome.Mismatch,
+        Native.ReferenceUpdateOutcome.Absent => ReferenceUpdateOutcome.Absent,
+        _ => throw new InteropException($"Unknown native reference update outcome {(byte)outcome}."),
+    };
 
     private IReadOnlyList<GitReferenceInfo> GetReferencesCore(byte[] glob)
     {
