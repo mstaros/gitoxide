@@ -223,7 +223,7 @@ fn refusal_outcome(error: &gix::reference::edit::Error) -> Option<ReferenceUpdat
     }
 }
 
-fn map_edit_error(error: gix::reference::edit::Error) -> GixError {
+pub(crate) fn map_edit_error(error: gix::reference::edit::Error) -> GixError {
     let detail = chain_to_string(&error);
     match &error {
         gix::reference::edit::Error::NameValidation(_) => GixError::InvalidReference(detail),

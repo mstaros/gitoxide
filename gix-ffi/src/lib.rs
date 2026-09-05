@@ -30,6 +30,7 @@ mod index;
 mod ignore;
 mod diff;
 mod references;
+mod notes;
 mod status;
 pub use byte_stream::ByteReader;
 pub use index::IndexEntryRecord;
@@ -38,6 +39,7 @@ pub use references::{
     BranchRecord, OptionalObjectId, ReferenceLockLease, ReferenceRecord, ReferenceUpdateOutcome,
 };
 pub use status::StatusRecord;
+pub use notes::{NoteRecord, NoteEntryRecord};
 
 /// The single error type crossing the boundary.
 ///
@@ -1205,6 +1207,85 @@ impl Repo {
         }
     }
 
+    /// Read an owned note from an exact reference, or the configured default when empty.
+    pub fn read_note(&self, annotated_object_id: ffi::String, notes_ref: ffi::Slice<u8>)
+        -> ffi::Result<NoteRecord, GixError>
+    {
+        let repo = self.inner.to_thread_local();
+        match notes::read(&repo, &annotated_object_id, notes_ref.as_slice()) {
+            Ok(note) => ffi::Ok(note), Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Materialize the notes compatibility result in annotated-object ID order.
+    pub fn enumerate_notes(&self, notes_ref: ffi::Slice<u8>)
+        -> ffi::Result<ffi::Vec<NoteEntryRecord>, GixError>
+    {
+        let repo = self.inner.to_thread_local();
+        match notes::enumerate(&repo, notes_ref.as_slice()) {
+            Ok(notes) => ffi::Ok(notes.into()), Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Write exact note bytes and atomically update the notes reference.
+    pub fn write_note(
+        &self,
+        annotated_object_id: ffi::String,
+        notes_ref: ffi::Slice<u8>,
+        data: ffi::Slice<u8>,
+        author_name: ffi::Slice<u8>,
+        author_email: ffi::Slice<u8>,
+        author_time_seconds: i64,
+        author_time_offset_seconds: i32,
+        committer_name: ffi::Slice<u8>,
+        committer_email: ffi::Slice<u8>,
+        committer_time_seconds: i64,
+        committer_time_offset_seconds: i32,
+        overwrite: bool,
+    ) -> ffi::Result<ffi::String, GixError> {
+        let repo = self.inner.to_thread_local();
+        let author = match notes::signature(author_name.as_slice(), author_email.as_slice(),
+            author_time_seconds, author_time_offset_seconds) {
+            Ok(value) => value, Err(error) => return ffi::Err(error),
+        };
+        let committer = match notes::signature(committer_name.as_slice(), committer_email.as_slice(),
+            committer_time_seconds, committer_time_offset_seconds) {
+            Ok(value) => value, Err(error) => return ffi::Err(error),
+        };
+        match notes::write(&repo, &annotated_object_id, notes_ref.as_slice(), data.as_slice(),
+            author, committer, overwrite) {
+            Ok(id) => ffi::Ok(id), Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Remove an existing note without deleting its notes reference.
+    pub fn remove_note(
+        &self,
+        annotated_object_id: ffi::String,
+        notes_ref: ffi::Slice<u8>,
+        author_name: ffi::Slice<u8>,
+        author_email: ffi::Slice<u8>,
+        author_time_seconds: i64,
+        author_time_offset_seconds: i32,
+        committer_name: ffi::Slice<u8>,
+        committer_email: ffi::Slice<u8>,
+        committer_time_seconds: i64,
+        committer_time_offset_seconds: i32,
+    ) -> ffi::Result<bool, GixError> {
+        let repo = self.inner.to_thread_local();
+        let author = match notes::signature(author_name.as_slice(), author_email.as_slice(),
+            author_time_seconds, author_time_offset_seconds) {
+            Ok(value) => value, Err(error) => return ffi::Err(error),
+        };
+        let committer = match notes::signature(committer_name.as_slice(), committer_email.as_slice(),
+            committer_time_seconds, committer_time_offset_seconds) {
+            Ok(value) => value, Err(error) => return ffi::Err(error),
+        };
+        match notes::remove(&repo, &annotated_object_id, notes_ref.as_slice(), author, committer) {
+            Ok(removed) => ffi::Ok(removed), Err(error) => ffi::Err(error),
+        }
+    }
+
     /// Enumerate local and/or remote-tracking branches.
     pub fn branches(&self, filter: u32) -> ffi::Result<ffi::Vec<BranchRecord>, GixError> {
         let repo = self.inner.to_thread_local();
@@ -1333,6 +1414,7 @@ pub fn ffi_inventory() -> RustInventory {
         .register(builtins_vec!(IndexEntryRecord))
         .register(builtins_vec!(StatusRecord))
         .register(builtins_vec!(TreeChangeRecord))
+        .register(builtins_vec!(NoteEntryRecord))
         .register(service!(ReferenceLockLease))
         .register(service!(Repo))
         .register(service!(ByteReader))
