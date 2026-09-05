@@ -796,7 +796,7 @@ records: `GixObjectMetadata`, `GixSignature`, `GixCommit`, `GixCommitInfo`,
 configuration or flag-bearing data. They do not encode mutually exclusive case
 shapes and should not be changed merely because union syntax becomes available.
 
-#### Later `ffi::Option` cleanup - internal FFI debt, public API stays stable
+#### Remaining `ffi::Option` cleanup - internal FFI debt, public API stays stable
 
 Several current FFI shapes manually encode optional values even though the
 hand-written managed surface already expresses them idiomatically:
@@ -813,23 +813,22 @@ hand-written managed surface already expresses them idiomatically:
 - `create_commit_from_index` uses `has_explicit_identity` plus name/email payload
   fields, while the public API already treats the supplied identity as optional.
 
-When Interoptopus's deferred `ffi::Option` union phase is available, these are
-candidates to become real optional FFI values instead of `has_* + payload` or
-empty-value sentinels. That cleanup should **not** change the existing public
-nullable/overload contracts merely to expose generated Option cases. Generated
-Option cases remain internal; preserve public `string?`, nullable records and
-operation overloads where those are already the correct managed shape.
+`ffi::Option` already has the generated union projection. Tag creation and reads
+use real optional tagger records, and tag reads use optional signature bytes.
+Their generated cases stay inside the boundary; public `GixSignature?` and
+`byte[]?` contracts remain idiomatic managed values. The sentinel shapes above
+are remaining cleanup candidates, with no deferred generator prerequisite.
+Preserve their existing public nullable and overload contracts.
 
-#### Later `ffi::Result` migration checkpoint
+#### Existing `ffi::Result` verification checkpoint
 
-The current generated surface contains twelve `Result*GixError` wrapper classes,
-and 22 generated `Repo` methods obtain native results through `.AsOk()`. Failed
-`.AsOk()` calls surface `EnumException<GixError>`, which the hand-written
-`Invoke` / `InvokeStatic` methods catch and translate to `GixException`. There
-are no hand-written managed `.AsOk()` / `.AsErr()` calls today.
+`ffi::Result` already has the generated union projection. The prototype counts
+of twelve result wrappers and 22 service methods are historical; the inventory
+now grows with the implemented methods. Generated service methods obtain native
+results through `.AsOk()`, whose `EnumException<GixError>` failures reach the
+hand-written `Invoke` / `InvokeStatic` boundary and become `GixException`.
 
-When Interoptopus later projects `ffi::Result` as a union, re-audit the generated
-service/result path rather than pre-emptively rewriting GixSharp. Preserve these
+Re-audit this path when the inventory or generator changes. Preserve these
 invariants:
 
 - a native `Err` still reaches the one hand-written `GixException` translation
@@ -842,8 +841,10 @@ invariants:
 - generated Result case types remain internal under rule 8 and do not alter any
   public GixSharp signature.
 
-There is no current `ffi::Option` wrapper to migrate immediately; the optional
-sentinel shapes above are the inventory to revisit when that later phase lands.
+The tag input/output Option paths now exercise this projection through the
+patched managed runtime. Remaining sentinel migrations are tracked separately
+above; their unchecked state does not imply that Option support is missing.
+
 ## Open architecture questions - priority order
 
 Feature/build profiles and ABI evolution are no longer open architecture
