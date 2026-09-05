@@ -196,6 +196,10 @@ public sealed partial class GixRepository : IDisposable
     public bool IsBare =>
         ReadMetadata(() => _isBare);
 
+    /// <summary>Gets whether the repository currently has a shallow history boundary.</summary>
+    public bool IsShallow =>
+        Invoke("IsShallow", static repo => repo.IsShallow());
+
     /// <summary>Gets whether this repository belongs to a linked worktree.</summary>
     public bool IsWorktree =>
         ReadMetadata(() => _isWorktree);
@@ -356,28 +360,28 @@ public sealed partial class GixRepository : IDisposable
         using var error = exception.Value;
         var (kind, message) = error switch
         {
-            { IsNotARepository: true } =>
-                (GixErrorKind.NotARepository, error.AsNotARepository().String),
-            { IsIo: true } =>
-                (GixErrorKind.Io, error.AsIo().String),
-            { IsConfig: true } =>
-                (GixErrorKind.Config, error.AsConfig().String),
-            { IsInvalidPath: true } =>
-                (GixErrorKind.InvalidPath, error.AsInvalidPath().String),
-            { IsInvalidId: true } =>
-                (GixErrorKind.InvalidId, error.AsInvalidId().String),
-            { IsNotFound: true } =>
-                (GixErrorKind.NotFound, error.AsNotFound().String),
-            { IsInvalidReference: true } =>
-                (GixErrorKind.InvalidReference, error.AsInvalidReference().String),
-            { IsReferenceConflict: true } =>
-                (GixErrorKind.ReferenceConflict, error.AsReferenceConflict().String),
-            { IsReferenceLocked: true } =>
-                (GixErrorKind.ReferenceLocked, error.AsReferenceLocked().String),
-            { IsOther: true } =>
-                (GixErrorKind.Other, error.AsOther().String),
-            _ =>
-                (GixErrorKind.Other, error.ToString()),
+            GixError.NotARepositoryCase(var value) =>
+                (GixErrorKind.NotARepository, value.String),
+            GixError.IoCase(var value) =>
+                (GixErrorKind.Io, value.String),
+            GixError.ConfigCase(var value) =>
+                (GixErrorKind.Config, value.String),
+            GixError.InvalidPathCase(var value) =>
+                (GixErrorKind.InvalidPath, value.String),
+            GixError.InvalidIdCase(var value) =>
+                (GixErrorKind.InvalidId, value.String),
+            GixError.NotFoundCase(var value) =>
+                (GixErrorKind.NotFound, value.String),
+            GixError.InvalidReferenceCase(var value) =>
+                (GixErrorKind.InvalidReference, value.String),
+            GixError.ReferenceConflictCase(var value) =>
+                (GixErrorKind.ReferenceConflict, value.String),
+            GixError.ReferenceLockedCase(var value) =>
+                (GixErrorKind.ReferenceLocked, value.String),
+            GixError.OtherCase(var value) =>
+                (GixErrorKind.Other, value.String),
+            null => throw Unexpected(operation,
+                new InteropException("The native error has no active case.")),
         };
 
         return new GixException(operation, kind, message);

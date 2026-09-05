@@ -6,8 +6,10 @@
 id: f7bf7635
 kind: bug
 severity: high
-status: open
+status: closed
 ```
+
+- [x] Resolved on 2026-09-04 by the registry dependency change `c68796bb`: the manifest now selects uniquely named `_mps` packages from registry `local`. No local crates.io patch or additional build.rs guard is required to prevent upstream substitution. Historical failure and proposal follow.
 
 ### Symptom
 
@@ -97,6 +99,8 @@ dotnet build gix-ffi/bindings/GixSharp.Tests/GixSharp.Tests.csproj
 ```
 ## GixError to GixErrorKind mapping is not exhaustive, so new variants degrade to Other
 
+- [x] Replace property-pattern/catch-all translation with exhaustive generated case-type matching. Transaction `691180980e389df06166ef8f` handles all ten cases and explicit null; CS8509 is an error. Removing ReferenceLockedCase in an in-memory compiler probe reports the missing case. Managed tests cover every mapping, owned messages and null errors. The diagnosis below is historical.
+
 Severity: medium. `GixRepository.cs` maps `GixError` to `GixErrorKind` with property patterns and a catch-all:
 
 ```csharp
@@ -129,6 +133,8 @@ The same catch-all shape should be looked for anywhere else the managed layer co
 The general problem - a hand-written managed layer that does not track generated changes and has nothing enforcing it - is already filed under "Hand-written GixSharp managed layer over the generated interop". This is the first concrete instance with a demonstrated cost.
 ## C# enum switches are not exhaustive, so outcome enums need an analyzer until closed enums land
 
+- [ ] Enforce the documented plain-outcome-enum coverage rule; keep this separate from union case matching.
+
 Severity: medium. `ReferenceUpdateOutcome` is payload-free, so interoptopus projects it as a plain C# `enum` - `public enum ReferenceUpdateOutcome : byte`, crossing as `ManagedConversion::AsIs` with no marshaller. That is the cheapest possible wire shape and the right one.
 
 The cost is that a C# `enum` switch is not exhaustive. Any integer can be cast to an enum value, so the compiler cannot require a caller to handle `Absent`. The distinction the outcome exists to express can be dropped again at the call site with no diagnostic.
@@ -152,7 +158,9 @@ Wrapping the enum in a hand-written C# union in the managed facade would give ex
 If the analyzer turns out to be more work than the union wrapper, that trade is worth revisiting. It was decided on the assumption that the analyzer is small.
 ## add_worktree derives its identifier non-atomically; git uses mkdir/EEXIST
 
-Severity: medium, open. `add_worktree` derives the administrative identifier from the checkout's final component and disambiguates against the entries it read a moment earlier (`unused_worktree_id`). Reading and then creating is not atomic, so two concurrent calls can derive the same unused identifier and both proceed.
+- [x] Atomic reservation implemented and integrated on 2026-09-05 in `0cff314e65e696a11ea37879b1919ada6ae56f15`. The diagnosis below is historical.
+
+Severity: medium, resolved. The original `add_worktree` implementation derived the administrative identifier from the checkout's final component and disambiguated against the entries it had read a moment earlier (`unused_worktree_id`). Reading and then creating was not atomic, so two concurrent calls could derive the same unused identifier and both proceed.
 
 ### Git already solves this, and the fix is the same shape
 
@@ -215,17 +223,89 @@ The `.gitattributes` rules stop new CRLF entering `.rs`, `.toml` or `.md`. Any o
 
 ## Completion contract
 
-The target is the complete public managed surface of `LibGit2.Native`, not every public function in `gix`. The current six-method Rust facade is approximately 1% of that target.
+The completion goal is **full public gix coverage for this fork**, confirmed by the user on 2026-09-05. The managed/FFI surface covers the union of the agreed native-profile capabilities, including methods added to gix in parallel. LibGit2.Native parity and CSharpMpc migration are intermediate compatibility and consumer-validation milestones.
 
-Each domain below is a separate issue and must be implemented in a separate transaction. A module issue is complete only when its transaction contains:
+Rust builders, iterators, callbacks, transactions and borrowed views need equivalent managed operations with explicit ownership; a raw `pub fn` count is not a coverage denominator. Every reachable public capability must be accounted for before the final completion checkbox is checked.
 
-- the Rust FFI facade records, enums, and methods for that domain
-- the idiomatic GixSharp managed API, with no generated disposable escaping
-- generation coverage proving `Interop.cs` is reproducible and never hand-edited
-- Rust tests plus TUnit tests against real repositories
-- issue status and evidence updated in the same commit
+Use the checkboxes in this document to continue implementation. Check an item only after its Rust facade, generated bindings, managed API, relevant tests and transaction integration are complete. Preserve the existing issue IDs and detailed evidence below. Completed parity slices stay checked; their broader gix domains remain open until the remaining operations are implemented.
 
-The binding is complete only after every module issue is closed and the final consumer-conformance issue passes.
+Independent new methods continue in parallel with generator and boundary-contract work. Apply a prerequisite to the APIs that depend on it: multi-field enum support gates those enum shapes; it does not block unrelated scalar methods or existing supported records. Regenerate Interop.cs after inventory changes and never edit it by hand. Commit each completed implementation transaction and update its checkboxes with validation evidence.
+
+## Implementation checklist
+
+### Completed foundation and compatibility slices
+
+- [x] Rust gix-ffi facade, generated Interop.cs and hand-written GixSharp layer are connected.
+- [x] Consume Interoptopus `interoptopus_mps` / `interoptopus_csharp_mps` 0.17.1 from registry `local` (`c68796bb`); upstream crates.io packages cannot silently substitute.
+- [x] Consume C# 15 union generation, including Option/Result carriers, under .NET 11 preview 7 with the patched runtime.
+- [x] Repository core/discovery compatibility slice — issue `2c6f1a01`.
+- [x] Objects/commit-graph compatibility slice — issue `2c6f1a02`.
+- [x] Status compatibility slice — issue `2c6f1a03`.
+- [x] Index/conflicts compatibility slice — issue `2c6f1a04`.
+- [x] References/branches compatibility slice — issue `2c6f1a05`.
+- [x] Diff/patch/tree-change compatibility slice — issue `2c6f1a06`; transaction `691180980e389df06166ef8f`, 41 native and 63 managed tests passed.
+- [x] P0a byte-stream boundary prototype and measurements — `61739044966d033186908aa4ef25157ff981d7a6`; public stream coverage remains below.
+- [x] Read the physical index for status/staging, including unchanged-timestamp writes; remove test reopen workarounds — `b3f28217b0b4310aa6e26782467875bbbfc31c84`, 31 native and 54 managed tests passed.
+- [x] Preserve work during linked-worktree removal — integrated transaction `f4ff9277b6b18b97692a2d52`.
+- [x] Reserve linked-worktree registrations atomically — `0cff314e65e696a11ea37879b1919ada6ae56f15`.
+
+### Remaining compatibility slices
+
+- [ ] Ignore/local-exclude compatibility slice — issue `2c6f1a07`.
+- [ ] Merge/snapshot/safe-checkout compatibility slice — issue `2c6f1a08`.
+- [ ] Remote metadata compatibility slice — issue `2c6f1a09`.
+- [ ] Worktree compatibility slice — issue `2c6f1a0a`.
+- [ ] Configuration compatibility slice — issue `2c6f1a0b`.
+- [ ] Notes compatibility slice — issue `2c6f1a0c`.
+- [ ] Sparse-checkout compatibility slice — issue `2c6f1a0d`.
+
+### Remaining public gix coverage
+
+These groups come from the current public source under `gix/src`. Split a group into method checkboxes as it is implemented; record its source APIs, managed equivalents and tests. A closed compatibility slice above does not close any of these groups.
+
+- [ ] Repository open/discovery options, environment/trust/config overrides, operation state, locations and workdir controls — `open/options.rs`, `repository/{state,location}.rs`, `lib.rs`.
+- [x] `Repository::is_shallow` → `GixRepository.IsShallow`, including same-handle observation after unshallow.
+- [ ] Shallow commit boundary information and shallow-file location — `repository/shallow.rs::{shallow_commits,shallow_file}`.
+- [ ] Repository object/cache controls — `repository/cache.rs`.
+- [x] `Repository::has_object` → `GixRepository.HasObject`; valid missing IDs return false and malformed/wrong-format IDs remain errors.
+- [x] `Repository::write_blob` → `GixRepository.WriteBlob(byte[])`; exact bytes, empty blobs, normal/bare repositories and managed disposal tested.
+- [ ] Blob writes from a stream — `repository/object.rs::write_blob_stream`.
+- [ ] Tree entry lookup, traversal and editing — `object/tree/{mod,traverse,editor}.rs`.
+- [ ] Annotated tag creation, reading and peeling — `repository/reference.rs`, `object/tag.rs`.
+- [ ] General revision resolution, merge-base variants and revision-walk controls — `repository/revision.rs`, `revision/walk.rs`.
+- [ ] Commit description and signature access/signing/verification — `object/commit.rs`, `commit/mod.rs`.
+- [ ] Full status change details, rewrites/copies, statistics, submodules, caller-selected head/index, iteration, cancellation and writeback outcomes — `status/{platform,index_worktree}.rs`, `status/iter/types.rs`.
+- [ ] Index creation/loading from trees and remaining public entry operations — `repository/index.rs`.
+- [ ] Reflogs, namespaces, reference transactions, guarded symbolic edits, peeling/following and branch tracking relationships — `repository/reference.rs`, `reference/{mod,log,remote}.rs`, `head/log.rs`, `repository/config/branch.rs`.
+- [ ] Full diff configuration, rewrite/copy tracking, statistics and reusable diff resources — `diff/`, `repository/diff.rs`.
+- [ ] Attributes and Git/worktree content-filter pipelines — `repository/{attributes,filter}.rs`, `filter.rs`.
+- [ ] Standalone pathspec matching and directory traversal/options — `repository/{pathspec,dirwalk}.rs`, `pathspec.rs`, `dirwalk/options.rs`.
+- [ ] Submodule configuration, IDs, paths, state/status and repository access — `repository/submodule.rs`, `submodule/mod.rs`.
+- [ ] Blame ranges and options — `repository/blame.rs`.
+- [ ] Mailmap and configured author/committer identity — `repository/{mailmap,identity}.rs`.
+- [ ] Remote mutation, refspecs, URL resolution and defaults — `remote/{access,build,save}.rs`, `repository/config/remote.rs`.
+- [ ] Clone preparation, fetch, ref mapping and checkout with progress/cancellation/credentials — `lib.rs`, `clone/`, `remote/connect.rs`, `remote/connection/`.
+- [ ] Full worktree administration, including remove/lock/unlock/repair/move — `repository/worktree_admin.rs`.
+- [ ] Typed configuration snapshots, source/trust information and overrides — `config/snapshot/`.
+- [ ] Remaining merge, checkout, notes and sparse-checkout operations/options, including sparse pattern listing — `repository/` and their public platform types.
+- [ ] Public object/worktree byte streams and archives — `repository/{object,worktree}.rs`; the existing managed byte-reader entry points are internal prototypes.
+- [ ] Reconcile every remaining reachable public gix API and feature-gated capability, including subsequent parallel additions, against the managed coverage above. Record remaining gaps here before claiming completion.
+
+### Boundary, delivery and completion
+
+- [ ] Complete named/multi-field Rust enum support in Interoptopus — `docs/csharp-multi-field-variants.md`; Step 1 is done, Steps 2–5 remain.
+- [x] Make the GixError mapper exhaustive with generated case types and promote missing-case diagnostic CS8509 to an error; compiler probe and managed behavior verified.
+- [ ] P0b stable error envelope: Kind, extensible Code, retryability and actionable typed recovery detail.
+- [ ] P0c bounded structured cursors with terminal/error semantics and ownership-closure checks.
+- [ ] Close the managed public-surface leakage invariant across methods, properties, records and nested/generic/array/by-ref types.
+- [ ] Replace sentinel-based HEAD state with the documented closed model once rich variants are supported.
+- [ ] Complete resource/transaction ownership and callback/progress/cancellation/credential contracts for their affected families.
+- [ ] Complete native feature profiles, runtime capability bootstrap, shared inventory/API guard and exact managed/native version checks.
+- [ ] Complete RID packaging, clean package consumption and supported-platform validation — issue `2c6f1a0e`.
+- [ ] Complete CSharpMpc consumer migration and its full tests — issue `2c6f1a0f`.
+- [ ] Full gix coverage: every public capability accounted for, implemented through the managed boundary, validated, integrated and checked above.
+
+Latest validated expansion on 2026-09-05: transaction `691180980e389df06166ef8f`, gix-ffi 41/41 native tests and GixSharp 63/63 managed tests. Managed build `op_495d6086de144daa` and patched-runtime run `op_15363769012d4c5e` succeeded. The earlier foundation at `b3f28217` had 31 native and 54 managed tests. These totals are validation evidence, not a coverage percentage.
 
 ## Sequencing evidence
 
@@ -426,7 +506,7 @@ Implemented and validated with OpenAI Codex assistance.
 id: 2c6f1a06
 kind: issue
 severity: high
-status: open
+status: closed
 ```
 
 ### Scope
@@ -440,6 +520,16 @@ Index/worktree/tree/commit comparisons cover additions, deletions, modifications
 ### Dependencies
 
 Repository core and discovery; objects and commit graph; index and conflicts.
+
+### Resolution
+
+- [x] Implemented in transaction `691180980e389df06166ef8f`: `GetDiff`, `GetPatch` and `GetTreeChanges`, with generated inventory updates and managed records.
+- [x] Staged (HEAD/index), unstaged (index/worktree) and complete worktree (HEAD/worktree) comparisons; unborn HEAD, pathspecs, binary summaries, no-final-newline data, additions/deletions, mode changes and read-only behavior.
+- [x] Tree/commit/tag comparisons preserve raw path bytes, object IDs, modes, deterministic ordering, configured renames/copies and gitlinks.
+- [x] Git-apply checks cover ordinary patches, raw non-UTF8 text, Unicode and ASCII spaced paths, and trailing-space index paths. Managed records retain owned bytes and keep text/byte values consistent after record `with` edits.
+- [x] Regenerated bindings; 41 native tests and 63 managed tests passed under the patched runtime. Missing-case compiler probe reports CS8509 as an error.
+
+This closes the documented compatibility slice. Configurable advanced diff resources, cursors, the remaining options and sparse-index support stay in the full-gix checklist above; unmerged and sparse-directory index inputs are rejected by this bounded patch API.
 
 ## Ignore and local exclude parity
 
@@ -611,7 +701,7 @@ Windows, Linux, and macOS package layouts are validated for supported architectu
 
 Can progress incrementally, but closes after all functional modules so it captures their complete inventory.
 
-## Full parity and CSharpMpc consumer migration
+## Full gix coverage and CSharpMpc consumer migration
 
 ```issue
 id: 2c6f1a0f
@@ -622,13 +712,13 @@ status: open
 
 ### Scope
 
-Create a machine-readable public-member parity inventory, replace the `LibGit2.Native` package in `CSharpMpc` with GixSharp, and run the real consumer suite.
+Complete the public gix capability-to-managed-member mapping in the checklist, including feature-gated operations and parallel additions. Replace the `LibGit2.Native` package in `CSharpMpc` with GixSharp and run the real consumer suite.
 
 This is the completion gate, not a place to add missing APIs. Any gap found here reopens or creates the appropriate domain issue and is fixed in its own transaction.
 
 ### Acceptance
 
-Every public managed `LibGit2.Native` member is mapped to an equivalent GixSharp member or an explicitly approved incompatibility. All Git-related CSharpMpc code compiles without compatibility shims leaking generated interop, its full tests pass, package consumption works from a clean restore, and the end-to-end chain is documented:
+Every reachable public gix capability is mapped to an implemented and tested GixSharp equivalent across the agreed native profiles. Every public managed `LibGit2.Native` member is also mapped for consumer migration. All Git-related CSharpMpc code compiles without compatibility shims leaking generated interop, its full tests pass, package consumption works from a clean restore, and the end-to-end chain is documented:
 
 `gix -> gix-ffi -> generated Interop.cs -> GixSharp -> CSharpMpc`.
 
@@ -675,8 +765,10 @@ Relevant for the upcoming `add` / `remove` / `prune` / `move` / `repair` work, w
 id: 0be88a6a
 kind: bug
 severity: high
-status: open
+status: closed
 ```
+
+- [x] Resolved on 2026-09-04 by `c68796bb`: gix-ffi selects `interoptopus_mps` and `interoptopus_csharp_mps` 0.17.1 from registry `local`; the machine registry configuration is in CARGO_HOME. Transaction worktrees no longer need a copied path-patch config. Historical failure and alternatives follow.
 
 `gix-ffi/.cargo/config.toml` carries a `[patch.crates-io]` pointing `interoptopus` and `interoptopus_csharp` at the local checkout. That file is **gitignored**, so `git worktree add` never creates it and every transaction worktree starts without it.
 
