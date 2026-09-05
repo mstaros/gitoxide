@@ -31,10 +31,10 @@ gix = { path = "../gix", features = [
     "blocking-network-client",
 ] }
 gix-shallow = { path = "../gix-shallow" }
-interoptopus_mps = { version = "0.17.1", registry = "local" }
+interoptopus_mps = { version = "0.18.0", registry = "local" }
 
 [dev-dependencies]
-interoptopus_csharp_mps = { version = "0.17.1", registry = "local" }
+interoptopus_csharp_mps = { version = "0.18.0", registry = "local" }
 
 # interoptopus is the fork published to the local registry: packages
 # `interoptopus_mps` and `interoptopus_csharp_mps`, registry alias `local`,

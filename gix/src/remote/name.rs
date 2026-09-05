@@ -17,10 +17,10 @@ pub struct Error {
 /// This means it has to be valid within a the ref path of a tracking branch.
 pub fn validated(name: impl Into<BString>) -> Result<BString, Error> {
     let name = name.into();
-    match gix_refspec::parse(
-        format!("refs/heads/test:refs/remotes/{name}/test").as_str().into(),
-        gix_refspec::parse::Operation::Fetch,
-    ) {
+    let mut spec = BString::from("refs/heads/test:refs/remotes/");
+    spec.push_str(name.as_bstr());
+    spec.push_str("/test");
+    match gix_refspec::parse(spec.as_bstr(), gix_refspec::parse::Operation::Fetch) {
         Ok(_) => Ok(name),
         Err(err) => Err(Error { source: err, name }),
     }
@@ -30,15 +30,15 @@ impl Name<'_> {
     /// Obtain the name as string representation.
     pub fn as_bstr(&self) -> &BStr {
         match self {
-            Name::Symbol(v) => v.as_ref().into(),
-            Name::Url(v) => v.as_ref(),
+            Name::Symbol(v) | Name::Url(v) => v.as_ref(),
         }
     }
 
-    /// Return this instance as a symbolic name, if it is one.
+    /// Return this instance as a symbolic UTF-8 name, if it is one.
+    /// For a non-UTF-8 symbolic name this returns `None`; use [Self::as_bstr()] for exact bytes.
     pub fn as_symbol(&self) -> Option<&str> {
         match self {
-            Name::Symbol(n) => n.as_ref().into(),
+            Name::Symbol(n) => n.to_str().ok(),
             Name::Url(_) => None,
         }
     }
@@ -60,28 +60,25 @@ impl Name<'_> {
     }
 }
 
+fn classify(name: Cow<'_, BStr>) -> Name<'_> {
+    if name.contains(&b'/') || name.as_ref() == "." {
+        Name::Url(name)
+    } else {
+        Name::Symbol(name)
+    }
+}
+
 impl<'a> TryFrom<Cow<'a, BStr>> for Name<'a> {
     type Error = Cow<'a, BStr>;
 
     fn try_from(name: Cow<'a, BStr>) -> Result<Self, Self::Error> {
-        if name.contains(&b'/') || name.as_ref() == "." {
-            Ok(Name::Url(name))
-        } else {
-            match name {
-                Cow::Borrowed(n) => n.to_str().ok().map(Cow::Borrowed).ok_or(name),
-                Cow::Owned(n) => Vec::from(n)
-                    .into_string()
-                    .map_err(|err| Cow::Owned(err.into_vec().into()))
-                    .map(Cow::Owned),
-            }
-            .map(Name::Symbol)
-        }
+        Ok(classify(name))
     }
 }
 
 impl From<BString> for Name<'static> {
     fn from(name: BString) -> Self {
-        Self::try_from(Cow::Owned(name)).expect("String is never illformed")
+        classify(Cow::Owned(name))
     }
 }
 

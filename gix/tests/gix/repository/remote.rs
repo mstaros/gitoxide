@@ -652,3 +652,54 @@ mod find_default_remote {
         Ok(())
     }
 }
+
+#[test]
+fn non_utf8_remote_config_keys_remain_distinct() -> crate::Result {
+    use gix::bstr::ByteSlice;
+    use gix::remote::{Direction, fetch::Tags};
+
+    let mut repo = crate::basic_repo()?;
+    let mut config = repo.config_snapshot_mut();
+    config.append_config(
+        [
+            b"remote.raw\xff.url=../one".as_slice(),
+            b"remote.raw\xff.pushurl=../push-one",
+            b"remote.raw\xff.fetch=+refs/heads/*:refs/remotes/one/*",
+            b"remote.raw\xff.push=refs/heads/main:refs/heads/one",
+            b"remote.raw\xff.tagOpt=--tags",
+            b"remote.raw\xfe.url=../two",
+            b"remote.raw\xfe.pushurl=../push-two",
+            b"remote.raw\xfe.fetch=+refs/heads/*:refs/remotes/two/*",
+            b"remote.raw\xfe.push=refs/heads/main:refs/heads/two",
+            b"remote.raw\xfe.tagOpt=--no-tags",
+            b"remote.empty\xff.prune=true",
+        ],
+        gix::config::Source::Api,
+    )?;
+    config.commit()?;
+
+    for (name, fetch, push, fetch_spec, push_spec, tags) in [
+        (b"raw\xff", "../one", "../push-one", "+refs/heads/*:refs/remotes/one/*", "refs/heads/main:refs/heads/one", Tags::All),
+        (b"raw\xfe", "../two", "../push-two", "+refs/heads/*:refs/remotes/two/*", "refs/heads/main:refs/heads/two", Tags::None),
+    ] {
+        for rewrite in [false, true] {
+            let remote = if rewrite {
+                repo.try_find_remote(name.as_bstr())
+            } else {
+                repo.try_find_remote_without_url_rewrite(name.as_bstr())
+            }.expect("configured remote")?;
+            assert_eq!(remote.name().expect("named").as_bstr(), name.as_bstr());
+            assert!(remote.name().expect("named").as_symbol().is_none());
+            assert!(remote.name().expect("named").as_url().is_none());
+            assert_eq!(remote.url(Direction::Fetch).map(|url| url.to_bstring()), Some(fetch.into()));
+            assert_eq!(remote.url(Direction::Push).map(|url| url.to_bstring()), Some(push.into()));
+            assert_eq!(remote.refspecs(Direction::Fetch).first().map(|spec| spec.to_ref().to_bstring()), Some(fetch_spec.into()));
+            assert_eq!(remote.refspecs(Direction::Push).first().map(|spec| spec.to_ref().to_bstring()), Some(push_spec.into()));
+            assert_eq!(remote.fetch_tags(), tags);
+        }
+    }
+    let empty = repo.try_find_remote(b"empty\xff".as_bstr()).expect("configured")?;
+    assert!(empty.url(Direction::Fetch).is_none());
+    assert!(empty.url(Direction::Push).is_none());
+    Ok(())
+}

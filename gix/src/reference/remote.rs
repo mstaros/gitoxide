@@ -23,7 +23,6 @@ impl<'repo> Reference<'repo> {
                         .get_or_insert_with(|| self.repo.remote_names())
                         .contains(candidate)
                 })
-                .and_then(|name| name.to_str().ok())
                 .map(|name| remote::Name::Symbol(name.into()))
             }
             Category::LocalBranch => self.repo.branch_remote_name(shortname, direction),

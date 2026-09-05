@@ -32,6 +32,7 @@ mod ignore;
 mod diff;
 mod references;
 mod notes;
+mod remote;
 mod status;
 pub use byte_stream::ByteReader;
 pub use index::IndexEntryRecord;
@@ -40,16 +41,15 @@ pub use references::{
     BranchRecord, OptionalObjectId, ReferenceLockLease, ReferenceRecord, ReferenceUpdateOutcome,
 };
 pub use status::StatusRecord;
+pub use remote::RemoteRecord;
 pub use notes::{NoteRecord, NoteEntryRecord};
 
 /// The single error type crossing the boundary.
 ///
-/// Deliberately coarse for now. `gix` error enums are mostly *struct*
-/// variants (`LockCommit { source, full_name }`), and interoptopus payload
-/// enums support single-field tuple variants only. Rather than introduce a
-/// companion `#[ffi]` struct per fielded variant across hundreds of `gix`
-/// variants, the whole `Display`/`source` chain is flattened into one
-/// message string here.
+/// Deliberately coarse for now: the whole `Display`/`source` chain is
+/// flattened into one message string. Interoptopus 0.18 supports named and
+/// multi-field variants; this facade still awaits the stable semantic error
+/// envelope and selective recovery detail specified in `HANDOFF.md`.
 ///
 /// Splitting this into per-domain error types is a breaking change for
 /// anyone matching on it, so it should happen once there are enough
@@ -1252,6 +1252,16 @@ impl Repo {
         ffi::Ok(false)
     }
 
+    /// Read current configured remotes in ascending raw-byte name order.
+    /// Stored URL bytes are preserved unless resolve_urls requests gix URL parsing and rewriting.
+    pub fn remotes(&self, resolve_urls: bool) -> ffi::Result<ffi::Vec<RemoteRecord>, GixError> {
+        let mut repo = self.inner.to_thread_local();
+        match remote::remotes(&mut repo, resolve_urls) {
+            Ok(records) => ffi::Ok(ffi::Vec::from(records)),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
     /// Enumerate references, optionally filtered by a raw-byte glob.
     ///
     /// An empty glob enumerates every ordinary reference.
@@ -1474,6 +1484,8 @@ pub fn ffi_inventory() -> RustInventory {
         .register(builtins_vec!(StatusRecord))
         .register(builtins_vec!(TreeChangeRecord))
         .register(builtins_vec!(NoteEntryRecord))
+        .register(builtins_vec!(ffi::Vec<u8>))
+        .register(builtins_vec!(RemoteRecord))
         .register(service!(ReferenceLockLease))
         .register(service!(Repo))
         .register(service!(ByteReader))

@@ -216,7 +216,7 @@ impl crate::Repository {
         let mut config_urls = |key: &'static config::tree::keys::Url, kind: &'static str| {
             self.config
                 .resolved
-                .strings_filter(&format!("remote.{}.{}", name_or_url, key.name), &mut filter)
+                .strings_filter_by("remote", Some(name_or_url), key.name, &mut filter)
                 .map(|urls| {
                     let mut effective_urls = Vec::new();
                     for url in urls {
@@ -246,7 +246,7 @@ impl crate::Repository {
         let config = &self.config.resolved;
 
         let fetch_specs = config
-            .strings_filter(&format!("remote.{}.{}", name_or_url, "fetch"), &mut filter)
+            .strings_filter_by("remote", Some(name_or_url), "fetch", &mut filter)
             .map(|specs| {
                 config_spec(
                     specs,
@@ -256,7 +256,7 @@ impl crate::Repository {
                 )
             });
         let push_specs = config
-            .strings_filter(&format!("remote.{}.{}", name_or_url, "push"), &mut filter)
+            .strings_filter_by("remote", Some(name_or_url), "push", &mut filter)
             .map(|specs| {
                 config_spec(
                     specs,
@@ -266,7 +266,7 @@ impl crate::Repository {
                 )
             });
         let fetch_tags = config
-            .string_filter(&format!("remote.{}.{}", name_or_url, "tagOpt"), &mut filter)
+            .string_filter_by("remote", Some(name_or_url), "tagOpt", &mut filter)
             .map(|value| {
                 config::tree::Remote::TAG_OPT
                     .try_into_tag_opt(value)
@@ -305,7 +305,7 @@ impl crate::Repository {
                     let name_is_url = matches!(
                         remote::Name::try_from(std::borrow::Cow::Borrowed(name_or_url)),
                         Ok(remote::Name::Url(_))
-                    ) || gix_path::is_absolute(gix_path::from_bstr(name_or_url));
+                    ) || gix_path::try_from_bstr(name_or_url).is_ok_and(gix_path::is_absolute);
                     match config::tree::Remote::URL.try_into_url(std::borrow::Cow::Borrowed(name_or_url)) {
                         Ok(url) if name_is_url || url.scheme != gix_url::Scheme::File => urls.push(url),
                         Ok(_) => {}

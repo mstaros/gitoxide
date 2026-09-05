@@ -27,7 +27,7 @@ impl Direction {
 pub enum Name<'repo> {
     /// A symbolic name, like `origin`.
     /// Note that it has not necessarily been validated yet.
-    Symbol(Cow<'repo, str>),
+    Symbol(Cow<'repo, BStr>),
     /// A url pointing to the remote host directly.
     Url(Cow<'repo, BStr>),
 }

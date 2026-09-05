@@ -107,7 +107,7 @@ mod name {
 
     #[test]
     fn compares_with_text_and_byte_strings() {
-        let symbol = gix::remote::Name::Symbol("origin".into());
+        let symbol = gix::remote::Name::Symbol(b"origin".as_bstr().into());
         assert_natural_equality!(symbol, "origin", "upstream");
         let symbol_ref = &symbol;
         assert_natural_equality!(symbol_ref, "origin", "upstream");
