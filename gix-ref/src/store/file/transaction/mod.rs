@@ -42,6 +42,29 @@ pub(in crate::store_impl::file) struct Edit {
 }
 
 impl Edit {
+    /// Return the previous and new object IDs for a reflog update, if any.
+    fn reflog_update(&self) -> Option<(Option<ObjectId>, &ObjectId)> {
+        use crate::{Target, transaction::{Change, PreviousValue}};
+        let Change::Update { new, expected, .. } = &self.update.change else {
+            return None;
+        };
+        match new {
+            Target::Symbolic(_) => match expected {
+                PreviousValue::ExistingMustMatch(Target::Object(commit_id)) => {
+                    Some((Some(ObjectId::null(commit_id.kind())), commit_id))
+                }
+                _ => None,
+            },
+            Target::Object(commit_id) => {
+                let previous = match expected {
+                    PreviousValue::MustExistAndMatch(Target::Object(previous_id)) => Some(*previous_id),
+                    _ => None,
+                }.or(self.leaf_referent_previous_oid);
+                Some((previous, commit_id))
+            }
+        }
+    }
+
     fn name(&self) -> BString {
         self.update.name.0.clone()
     }

@@ -97,6 +97,37 @@ pub mod create_or_update {
     use crate::store_impl::{file, file::WriteReflog};
 
     impl file::Store {
+        /// Validate inputs for a reflog that would be written, without changing the filesystem.
+        pub(crate) fn reflog_validate(
+            &self,
+            name: &FullNameRef,
+            committer: Option<gix_actor::SignatureRef<'_>>,
+            message: &BStr,
+            force_create_reflog: bool,
+        ) -> Result<bool, Error> {
+            if self.write_reflog == WriteReflog::Disable {
+                return Ok(false);
+            }
+            let (_, full_name) = self.reflog_base_and_relative_path(name);
+            let reflog_path = self.reflog_path(name);
+            let writes = self.write_reflog == WriteReflog::Always
+                || force_create_reflog
+                || self.should_autocreate_reflog(&full_name)
+                || reflog_path.try_exists().map_err(|source| Error::Append {
+                    source, reflog_path: reflog_path.clone(),
+                })?;
+            if !writes {
+                return Ok(false);
+            }
+            if message.contains(&b'\n') {
+                return Err(Error::MessageWithNewlines);
+            }
+            committer.ok_or(Error::MissingCommitter)?.trim()
+                .write_to(&mut std::io::sink())
+                .map_err(|source| Error::Append { source, reflog_path })?;
+            Ok(true)
+        }
+
         pub(crate) fn reflog_create_or_append(
             &self,
             name: &FullNameRef,
