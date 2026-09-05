@@ -4,7 +4,8 @@ Status updated on 2026-09-05. The earlier foundation was verified at
 `b3f28217b0b4310aa6e26782467875bbbfc31c84`; the completed wrapper expansion is
 integrated as `22c1da14`, followed by ignore/local-exclude at `c051d784`.
 The shallow boundary/location slice is recorded in transaction
-`617a0c2ea46d9ae649f97241`.
+`617a0c2ea46d9ae649f97241` and integrated as `24b9b9e9`. Notes compatibility
+is recorded in transaction `ecab46028c7fc71d74eda427`.
 The completion goal is full public gix coverage, confirmed by the user.
 Use the checkboxes here for boundary work and the implementation checklist in
 `../Issues.md` for method/domain coverage. Historical prototype counts and examples
@@ -14,7 +15,7 @@ below are design context, not current progress totals.
 
 A .NET binding over gitoxide (`gix`) targeting **full gix coverage**.
 
-**Status: implementation in progress.** Both layers work end to end. Seven
+**Status: implementation in progress.** Both layers work end to end. Eight
 initial compatibility slices are complete, with additional gix methods still to
 implement. Full gix coverage includes methods being added to the fork in parallel.
 Independent methods continue while their applicable boundary contracts are completed.
@@ -43,6 +44,10 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
 - [x] Diff/patch/tree-change compatibility slice, with exact-byte snapshots.
 - [x] Ignore/local-exclude compatibility slice, including exact-byte/idempotent
   writes, Git precedence and linked-worktree common-directory routing.
+- [x] Notes compatibility slice: WriteNote, ReadNote, TryReadNote, EnumerateNotes
+  and RemoveNote with owned note/signature bytes, default/custom refs, guarded
+  direct/symbolic updates and Git comparisons. Remaining platform controls and
+  general note cursors stay unchecked in the full-coverage checklist.
 - [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
 - [x] GetShallowCommits, ShallowFilePath and raw-byte ShallowFile. Owned snapshots
   read through `gix-shallow` directly, avoiding mtime-only cache staleness; empty,
@@ -55,10 +60,12 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   0.17.1 from registry `local`.
 - [x] Fresh-index status/staging correction integrated at `b3f28217`;
   retained foundation validation: 31/31 native tests and 54/54 managed tests.
-- [x] Expansion validation: 50/50 native tests; 71/71 managed tests via
-  PatchedCoreRun/corerun.exe, operation `op_88bad4eb45094c28`; managed build
-  `op_1b5738b5e9fe431e` succeeded. The preceding ignore slice passed 47 native
-  and 68 managed tests; the diff/scalar slice passed 41 native and 63 managed.
+- [x] Expansion validation: 57/57 native tests, operation
+  `0db74891c6d7e07ac89ae654a3210b31`; 76/76 managed tests via
+  PatchedCoreRun/corerun.exe, operation `op_a6e1ec1ac720430d`; managed build
+  `op_6165c83baf3047e2` succeeded. The preceding shallow slice passed 50 native
+  and 71 managed tests (`op_88bad4eb45094c28`); ignore passed 47 native and
+  68 managed tests; diff/scalar passed 41 native and 63 managed.
 - [ ] Complete every remaining public gix capability in the `../Issues.md`
   implementation checklist, including additions made in parallel.
 - [ ] Complete the remaining boundary, profile and delivery checks below.
