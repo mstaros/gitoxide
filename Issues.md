@@ -299,7 +299,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [x] Make the GixError mapper exhaustive with generated case types and promote missing-case diagnostic CS8509 to an error; compiler probe and managed behavior verified.
 - [ ] P0b stable error envelope: Kind, extensible Code, retryability and actionable typed recovery detail.
 - [ ] P0c bounded structured cursors with terminal/error semantics and ownership-closure checks.
-- [ ] Close the managed public-surface leakage invariant across methods, properties, records and nested/generic/array/by-ref types.
+- [x] Close the managed public-surface leakage invariant across methods, properties, records and nested/generic/array/by-ref types — transaction `475a8ce11774fbdc801a1e09`. The structural check covers public/protected nested declarations, fields, events, bases, interfaces, delegates and constraints. It caught and closed the generated `ReferenceUpdateOutcome` leak while preserving its public name, byte representation and three values. Validation against target `b49657f6c3bd913b559cb6158cd786f11c0cdd89` passed 66/66 native tests including generation (`ec2873a5b6426ac8ab9f658c137972ea`) and 86/86 patched-required managed tests (`op_39fb50b624104519`).
 - [ ] Replace sentinel-based HEAD state with the documented closed model once rich variants are supported.
 - [ ] Complete resource/transaction ownership and callback/progress/cancellation/credential contracts for their affected families.
 - [ ] Complete native feature profiles, runtime capability bootstrap, shared inventory/API guard and exact managed/native version checks.
