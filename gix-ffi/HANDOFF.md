@@ -6,7 +6,8 @@ integrated as `22c1da14`, followed by ignore/local-exclude at `c051d784`.
 The shallow boundary/location slice is recorded in transaction
 `617a0c2ea46d9ae649f97241` and integrated as `24b9b9e9`. Notes compatibility
 is integrated as `ee8ffcb7`. Configuration compatibility is recorded in transaction
-`d461153e562eea7ec0b754bb`.
+`d461153e562eea7ec0b754bb`. The annotated/lightweight tag slice is recorded in
+transaction `b1cbb5ba3e7ab5b6b96985a2`, based on managed-boundary commit `e37f298c`.
 The completion goal is full public gix coverage, confirmed by the user.
 Use the checkboxes here for boundary work and the implementation checklist in
 `../Issues.md` for method/domain coverage. Historical prototype counts and examples
@@ -58,6 +59,12 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   successful persistence remains successful if typed reopening fails, with other
   operations retaining prior cached settings until a valid refresh. Valid identity
   writes refresh later commits on the same handle.
+- [x] Annotated/lightweight tags: CreateAnnotatedTag, CreateTagReference,
+  ReadTag and PeelTags. GixTag owns exact name/message/tagger bytes and extracted
+  signature armor; optional taggers use real Option carriers. Tests cover Git
+  object equality, all target kinds, nested peeling, concurrent create, force,
+  foreign locks, malformed/dangling tags and Windows path validation before
+  object writes. Signature extraction does not verify authenticity.
 - [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
 - [x] GetShallowCommits, ShallowFilePath and raw-byte ShallowFile. Owned snapshots
   read through `gix-shallow` directly, avoiding mtime-only cache staleness; empty,
@@ -70,14 +77,14 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   0.17.1 from registry `local`.
 - [x] Fresh-index status/staging correction integrated at `b3f28217`;
   retained foundation validation: 31/31 native tests and 54/54 managed tests.
-- [x] Expansion validation: 66/66 native tests, operation
-  `44573d676596122f55e49dc04bd22592`; 82/82 managed tests via
-  PatchedCoreRun/corerun.exe, operation `op_d83d8f99218340ad`; managed build
-  `op_d044f50e2bc94ac4` succeeded. Includes, private git-dir conditions,
-  malformed typed-value repair and process cwd changes are covered. Preceding
-  notes passed 57 native and 76 managed tests; shallow passed 50 native and
-  71 managed; ignore passed 47 native and 68 managed; diff/scalar passed
-  41 native and 63 managed.
+- [x] Expansion validation: 75/75 native tests, operation
+  `cbeca59bb68a65f7ff9bddd905aa2867`; 92/92 managed tests via
+  PatchedCoreRun/corerun.exe, operation `op_349b35f8b2b941a4`; managed build
+  `op_2faa924be8b04d77` succeeded. Includes all 9 native and 6 managed tag tests
+  and the whole-public-surface boundary check against the regenerated bindings.
+  The preceding boundary slice passed 66 native and 86 managed tests;
+  configuration passed 66/82, notes 57/76, shallow 50/71, ignore/local-exclude
+  47/68 and diff/scalar 41/63.
 - [ ] Complete every remaining public gix capability in the `../Issues.md`
   implementation checklist, including additions made in parallel.
 - [ ] Complete the remaining boundary, profile and delivery checks below.
