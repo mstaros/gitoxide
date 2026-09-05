@@ -81,6 +81,91 @@ impl Snapshot<'_> {
 
 /// Utilities and additional access
 impl Snapshot<'_> {
+    /// Read fresh configuration from disk into an owned file, using the repository's open options.
+    ///
+    /// Global, common and worktree configuration, includes, conditional includes, environment and
+    /// API/CLI overrides use the same precedence and permissions as repository opening. Conditions
+    /// use the current branch and this worktree's private Git directory. Relative repository paths
+    /// are anchored to the working directory recorded when the repository was opened, including
+    /// the HEAD lookup used for conditional includes. The file metadata identifies the common
+    /// repository-local configuration path.
+    ///
+    /// The returned file does not validate typed repository settings, except for the
+    /// `extensions.worktreeConfig` switch needed to select configuration files. This allows raw
+    /// values to be inspected and repaired even when they would prevent reopening the repository.
+    /// Syntax and read errors follow the stored strict/lenient configuration policy.
+    ///
+    /// This does not change this snapshot or the repository's typed caches. In-memory-only snapshot
+    /// edits are not included. Use [`Repository::reload()`][crate::Repository::reload()] to reopen
+    /// the repository and apply valid configuration to its cached state.
+    pub fn reload(&self) -> Result<gix_config::File, crate::config::Error> {
+        use crate::config::{cache, tree::Extensions};
+
+        let options = &self.repo.options;
+        let git_dir = options.current_dir_or_empty().join(self.repo.git_dir());
+        let common_dir = options.current_dir_or_empty().join(self.repo.common_dir());
+        let trust = options.git_dir_trust.expect("repository trust was determined during opening");
+        let mut buf = Vec::with_capacity(512);
+        let mut config = cache::load_config(
+            common_dir.join("config"),
+            &mut buf,
+            gix_config::Source::Local,
+            trust,
+            options.lossy_config,
+            options.lenient_config,
+        )?;
+        if cache::util::config_bool(
+            &config,
+            &Extensions::WORKTREE_CONFIG,
+            "extensions.worktreeConfig",
+            false,
+            options.lenient_config,
+        )? {
+            config.append(cache::load_config(
+                git_dir.join("config.worktree"),
+                &mut buf,
+                gix_config::Source::Worktree,
+                trust,
+                options.lossy_config,
+                options.lenient_config,
+            )?)?;
+        }
+        // Recreate only the ref reader with anchored paths, without reopening the
+        // repository or validating its typed configuration.
+        let ref_options = gix_ref::store::init::Options {
+            write_reflog: self.repo.refs.write_reflog,
+            precompose_unicode: self.repo.refs.precompose_unicode,
+            prohibit_windows_device_names: self.repo.refs.prohibit_windows_device_names,
+        };
+        let mut refs = if self.repo.refs.common_dir().is_some() {
+            crate::RefStore::for_linked_worktree_opts(
+                git_dir.clone(), common_dir, self.repo.object_hash(), ref_options,
+            )
+        } else {
+            crate::RefStore::at_opts(git_dir.clone(), self.repo.object_hash(), ref_options)
+        };
+        refs.namespace.clone_from(&self.repo.refs.namespace);
+        let head = refs.find("HEAD").ok();
+        let git_install_dir = crate::path::install_dir().ok();
+        let environment = options.permissions.env;
+        let home = gix_path::env::home_dir().and_then(|home| environment.home.check_opt(home));
+        cache::load(
+            Some(config),
+            &mut buf,
+            Some(&git_dir),
+            head.as_ref().and_then(|head| head.target.try_name()),
+            git_install_dir.as_deref(),
+            home.as_deref(),
+            environment,
+            options.permissions.config,
+            options.lossy_config,
+            options.lenient_config,
+            &options.api_config_overrides,
+            &options.cli_config_overrides,
+            options.use_repository_local_environment,
+        )
+    }
+
     /// Returns the underlying configuration implementation for a complete API, despite being a little less convenient.
     ///
     /// It's expected that more functionality will move up depending on demand.
