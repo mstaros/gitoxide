@@ -10,6 +10,8 @@ is integrated as `ee8ffcb7`. Configuration compatibility is recorded in transact
 transaction `b1cbb5ba3e7ab5b6b96985a2`, based on managed-boundary commit `e37f298c`.
 Identity/mailmap transaction `12351a13bee70d62d69cda3d` includes tags and the
 SHA-256 object-ID update through target `2627094`.
+Remotes and 0.18.0 fork consumption are recorded in transaction
+`6e1237640581f12b73f9a67e`, based on identity commit `649e35ae`.
 The completion goal is full public gix coverage, confirmed by the user.
 Use the checkboxes here for boundary work and the implementation checklist in
 `../Issues.md` for method/domain coverage. Historical prototype counts and examples
@@ -83,6 +85,11 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   object equality, all target kinds, nested peeling, concurrent create, force,
   foreign locks, malformed/dangling tags and Windows path validation before
   object writes. Signature extraction does not verify authenticity.
+- [x] Remote metadata compatibility slice: GetRemotes() and GetRemotes(bool)
+  return owned GitRemote records with exact-byte names and all fetch/push URLs.
+  Stored bytes are the default; explicit resolution uses gix URL rewrites.
+  Missing/reset URLs, includes, linked worktrees, unchanged timestamps, malformed
+  config, raw-byte ordering and ownership after disposal are covered.
 - [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
 - [x] GetShallowCommits, ShallowFilePath and raw-byte ShallowFile. Owned snapshots
   read through `gix-shallow` directly, avoiding mtime-only cache staleness; empty,
@@ -92,16 +99,23 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
 - [x] P0a byte-stream boundary prototype and measurements.
 - [x] Interoptopus C# 15 unions consumed in generated Interop.cs.
 - [x] Fork dependencies select `interoptopus_mps` and `interoptopus_csharp_mps`
-  0.17.1 from registry `local`.
+  0.18.0 from registry `local`, release `9c04f708` / registry commit `597987e1`.
 - [x] Fresh-index status/staging correction integrated at `b3f28217`;
   retained foundation validation: 31/31 native tests and 54/54 managed tests.
-- [x] Expansion validation: 82/82 native tests including generation, operation
-  `5740e99bf32c4a7fb8ec68f8c58177aa`; 97/97 managed tests via
-  PatchedCoreRun/corerun.exe, operation `op_be1c924455aa4b6f`; managed build
-  `op_0e00eeb679ba4bec` succeeded. Includes identity/mailmap, all tag tests and
-  the whole-public-surface boundary check against the regenerated bindings.
-  The preceding tags slice passed 75/92, boundary 66/86, configuration 66/82,
-  notes 57/76, shallow 50/71, ignore/local-exclude 47/68 and diff/scalar 41/63.
+- [x] Expansion validation: 87/87 native tests including generation, operation
+  `6e6e3e9ef46cf8ba17cad31c6b5a23b5`; 101/101 managed tests via
+  PatchedCoreRun/corerun.exe, operation `op_ea3d69e178e44396`; managed build
+  `op_885e4fc0bbe14ee2` succeeded after pulling identity commit `649e35ae`.
+  Includes all remote, identity/mailmap and tag tests and the whole-public-surface
+  boundary check. Exactly five fork versions/checksums changed to 0.18.0, all
+  retaining `registry+file:///D:/feeds/LocalCargo/` provenance in Cargo.lock.
+  The preceding identity/mailmap slice passed 82/97, tags 75/92, boundary 66/86,
+  configuration 66/82, notes 57/76, shallow 50/71, ignore 47/68 and diff/scalar 41/63.
+- [x] Preserve exact checkout/build paths in cached Rust compilation with the
+  root `.kache.toml` key_env_vars declaration. Kache applies these declared values
+  after path normalization; the prior failed gate and replacement evidence are
+  recorded in `../Issues.md`. Focused path-sensitive tests and remote 50/50 passed
+  in the fresh worktree; the full inferred commit gate remains required.
 - [ ] Complete every remaining public gix capability in the `../Issues.md`
   implementation checklist, including additions made in parallel.
 - [ ] Complete the remaining boundary, profile and delivery checks below.
@@ -201,12 +215,9 @@ for `blocking-client` + `async-client` together.
 11. **Closed semantic alternatives are Rust enums; Interoptopus owns their
     projection.** Do not permanently flatten a natural Rust data enum into a
     tag-plus-nullable-field record or facade-only wrapper cases to compensate
-    for the current generator's single-payload limitation. Interoptopus is the
-    generic owner of discriminant modeling, ABI lowering and C# projection. Its
-    current union plan fixes discriminant correctness and projects the existing
-    plain `DataEnum` model; full named/multi-field Rust variant support is a
-    separate generic-tool evolution. GixSharp will wait rather than freeze a
-    temporary competing sum-type architecture into its ABI. Open domains such
+    for a generator limitation. Interoptopus owns discriminant modeling, ABI
+    lowering and C# projection; its 0.18.0 release supports named and multi-field
+    variants. Use that support when adopting closed states. Open domains such
     as `GixException.Code` and capability identifiers remain deliberately
     non-exhaustive and must not become closed unions.
 
@@ -223,7 +234,7 @@ artifact.
 
 **The fork is selected by distinct registry package names.** Since `c68796bb`,
 `gix-ffi/Cargo.toml` requests `interoptopus_mps` and
-`interoptopus_csharp_mps` 0.17.1 from registry `local`. Configure that existing
+`interoptopus_csharp_mps` 0.18.0 from registry `local`. Configure that existing
 registry under CARGO_HOME on the build machine. A transaction worktree does not
 need a copied crates.io path-patch config; the old silent-substitution issues
 `f7bf7635` and `0be88a6a` are resolved by the manifest change.
@@ -254,30 +265,20 @@ contract and do not infer that a matched case should be disposed independently.
 
 ## Corrections to earlier assumptions
 
-Each was believed and wrong. Recorded so they are not re-derived:
+The first three entries record the completed generator changes and their
+remaining ownership rules. The other corrections still apply.
 
-- The **current** Interoptopus enum model is limited to unit variants and
-  single-payload tuple variants; named/struct variants and multi-field tuples
-  are not represented. That is a real generic-tool limitation, not a GixSharp
-  architecture to preserve. `docs/csharp-unions.md` in the Interoptopus checkout
-  plans to correct discriminant modeling and project the existing plain
-  `DataEnum` model as opt-in C# 15 custom unions without changing the native ABI.
-  Full named/multi-field Rust variant modeling is explicitly separate from that
-  first union implementation. The plan is not implemented yet and still marks
-  Step 0 as blocking.
-- The current C# generator's `body_exception_for_variant` does not produce a
-  distinct exception *class* per variant, but the error data is recoverable:
-  `.AsOk()` throws `EnumException<GixError>` whose `.Value` carries the typed
-  enum. Match on `IsNotARepository` / `IsIo` / ... and read payloads through
-  `AsX()`. **Do not dispose the payload separately** - `AsX()` returns the
-  enum's own field and the enum's `Dispose` covers it; disposing it again is a
-  double-dispose. This describes the current generated bindings only, not the
-  target C# 15 union-facing consumption style.
-- Interoptopus currently has a real discriminant-model defect for payload
-  variants: its C# model uses the positional index for tuple-variant tags while
-  unit variants retain their declared tag. The planned Step 0 fixes this in the
-  generic model before union projection. Do not build GixSharp logic that
-  assumes today's tuple-variant tag behavior is authoritative.
+- The prototype Interoptopus model accepted unit and single-payload tuple
+  variants. The completed union and named/multi-field plans remove that generic
+  limitation; 0.18.0 is consumed above. Do not preserve the prototype restriction
+  in new GixSharp API designs.
+- `.AsOk()` retains its typed `EnumException<GixError>` compatibility behavior.
+  Current GixSharp maps generated C# 15 cases exhaustively. Payload cases remain
+  views of their owner: **do not dispose the payload separately** when its owning
+  enum already covers disposal.
+- The earlier payload-discriminant defect used positional tuple tags while unit
+  variants retained their declared tags. Step 0 corrected the generic model;
+  current GixSharp consumes those corrected tags through generated bindings.
 - Binding generation is a **test**, not `build.rs` - a build script cannot
   call into the crate it is building.
 - `interoptopus_csharp::Interop` does not exist; it is `RustLibrary`. That
@@ -417,9 +418,9 @@ The accepted error direction is:
   diagnostic message and selective structured detail. The envelope is retained
   because these fields cut across concrete gix error variants and protect the
   managed contract from upstream taxonomy churn; it is **not** a workaround for
-  Interoptopus's current payload-enum limitation.
-- **Structured recovery detail is a closed semantic sum type.** Once the planned
-  Interoptopus C# 15 union projection is available, model actionable detail as
+  Interoptopus's former payload-enum limitation.
+- **Structured recovery detail is a closed semantic sum type.** Use the completed
+  Interoptopus C# 15 union projection to model actionable detail as
   an internal Rust data enum and consume the generated union through pattern
   matching. Examples include reference-conflict detail and object-type-mismatch
   detail. Use a payload record when that record is itself the natural domain
@@ -458,10 +459,8 @@ The accepted error direction is:
   retryability. Never classify by matching `Display` strings.
 
 This is the one intentional taxonomy break to make before breadth. Freeze the
-semantic envelope now, but do not lock in temporary generated-detail ergonomics
-from today's Interoptopus backend. The final structured-detail ABI should be
-implemented against the planned discriminant fix and C# 15 union projection so
-it does not immediately require a second representation migration. Preserve
+semantic envelope now and implement its structured-detail ABI against the
+completed discriminant model and C# 15 union projection. Preserve
 `GixException.Operation` and diagnostic message while replacing the current
 coarse `Kind` semantics and adding `Code`, retryability and optional typed
 detail. `guard!(ffi_inventory)` catches managed/native ABI mismatch but does not
@@ -658,8 +657,9 @@ native/generated layouts alive. Keeping those boundaries separate is what makes
 hundreds of future FFI additions tractable.
 ### Interoptopus enum / C# 15 union dependency
 
-The union projection in `interoptopus/docs/csharp-unions.md` is complete and is
-already consumed by GixSharp. The remaining rich-variant work has its own plan.
+The union projection and named/multi-field variant plan are complete and consumed
+by GixSharp through the 0.18.0 fork packages. Managed semantic adoption remains
+tracked by the unchecked items below.
 
 - [x] Correct discriminants and collision-safe generated names.
 - [x] net11 / LangVersion=preview targeting.
@@ -677,13 +677,14 @@ already consumed by GixSharp. The remaining rich-variant work has its own plan.
 - [x] Interoptopus named/multi-field Steps 3–4: centralized per-field names and
   payload iteration in WireIO/wire (`fcff19e78`); reference output stayed identical,
   with 200 Rust tests and 223 reference C# tests passing the exact commit gate.
-- [ ] Verify an explicitly patched runtime launch for the generator reference
-  suite; its current harness uses `dotnet run`. GixSharp is verified with corerun.
-- [ ] Complete named/multi-field Step 5 in
-  `interoptopus/docs/csharp-multi-field-variants.md` before exposing API shapes
-  that require those variants.
-- [ ] Complete the remaining GixSharp public-surface and semantic-error adoption
-  checks below.
+- [x] Verify the generator reference suite under explicitly selected corerun:
+  237 managed tests passed in Step 5 `380904ef`; release gate
+  `0d61e85d4943a1387a2f9bec52672c80` passed all four required steps.
+- [x] Complete named/multi-field Step 5 in
+  `interoptopus/docs/csharp-multi-field-variants.md`, including named and tuple
+  payloads, ownership, layout, wire round trips and retained single-field contracts.
+- [ ] Complete the remaining GixSharp semantic-state and semantic-error adoption
+  checks below; the structural public-surface leakage gate is complete.
 
 The generated custom [Union] representation retains the native tag/payload ABI.
 Its explicit managed empty-state policy distinguishes unconstructed structs from
@@ -808,12 +809,9 @@ This is different from `FfiObjectType`: it is an intentional public pre-1.0
 breaking change. Keep generated Interoptopus union/case types internal under
 rule 8 and translate them to a hand-written public `GixHead` sum type. The Rust
 FFI should ultimately model the same closed states as a data enum rather than
-retain booleans and empty-value sentinels. Because the current Interoptopus plan
-for plain `DataEnum` still lacks natural named/multi-field Rust variants, do not
-rush `HeadInfo` into artificial generator-driven shapes solely to land with the
-first union projection; consume the generic richer-enum support when it is
-available, or use payload records only where they are semantically meaningful in
-the domain.
+retain booleans and empty-value sentinels. Interoptopus 0.18.0 now supports
+natural named/multi-field Rust variants. Consume that support when adopting
+HeadInfo; use payload records where they are semantically meaningful in the domain.
 
 Existing tests already cover all three useful HEAD states: ordinary symbolic
 resolved HEAD, newly initialized/unborn HEAD, and detached HEAD. Convert those
@@ -961,7 +959,7 @@ slice with its validation evidence.
 - `core.longpaths true` is set; gitoxide's own fixtures still hit MAX_PATH
   in long transaction worktrees.
 - interoptopus fork at `D:/repos/interoptopus`, consumed as `_mps` packages
-  version 0.17.1 from the existing machine-configured registry `local`.
+  version 0.18.0 from the existing machine-configured registry `local`.
 - .NET 11 preview 7 with the patched runtime, C# 15, `LangVersion=preview`, `EnablePreviewFeatures`,
   `runtime-async=on`, TUnit 1.36.0 - matching `CSharpMpc.Server`.
 - `CSharpEditor:build_diagnostics` does not accept `.slnx`; point it at a

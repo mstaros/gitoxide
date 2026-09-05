@@ -236,7 +236,7 @@ Independent new methods continue in parallel with generator and boundary-contrac
 ### Completed foundation and compatibility slices
 
 - [x] Rust gix-ffi facade, generated Interop.cs and hand-written GixSharp layer are connected.
-- [x] Consume Interoptopus `interoptopus_mps` / `interoptopus_csharp_mps` 0.17.1 from registry `local` (`c68796bb`); upstream crates.io packages cannot silently substitute.
+- [x] Consume Interoptopus `interoptopus_mps` / `interoptopus_csharp_mps` 0.18.0 from registry `local`; clean release `9c04f708` and registry commit `597987e1`. All five fork packages retain the local registry source and checksums; upstream crates.io packages cannot silently substitute.
 - [x] Consume C# 15 union generation, including Option/Result carriers, under .NET 11 preview 7 with the patched runtime.
 - [x] Repository core/discovery compatibility slice — issue `2c6f1a01`.
 - [x] Objects/commit-graph compatibility slice — issue `2c6f1a02`.
@@ -254,7 +254,7 @@ Independent new methods continue in parallel with generator and boundary-contrac
 ### Remaining compatibility slices
 
 - [ ] Merge/snapshot/safe-checkout compatibility slice — issue `2c6f1a08`.
-- [ ] Remote metadata compatibility slice — issue `2c6f1a09`.
+- [x] Remote metadata compatibility slice — issue `2c6f1a09`; owned raw-byte names and fetch/push URL lists, GetRemotes() and explicit URL-resolution overload.
 - [ ] Worktree compatibility slice — issue `2c6f1a0a`.
 - [x] Configuration compatibility slice — issue `2c6f1a0b`; GetConfigString, TryGetConfigString, SetConfigString and DeleteConfigValue.
 - [ ] Sparse-checkout compatibility slice — issue `2c6f1a0d`.
@@ -287,7 +287,7 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [x] Owned GixSignature.NameBytes/EmailBytes and FromBytes preserve constructor/deconstruction/with/init behavior and raw commit/note/tag identities. ResolveMailmap/TryResolveMailmap follow lenient gix loading, preserve partial mappings, raw bytes and input timestamps; Try reports whether a mapping applies. Transaction `12351a13bee70d62d69cda3d`: 82/82 native tests including generation (`5740e99bf32c4a7fb8ec68f8c58177aa`) and 97/97 patched managed tests (`op_be1c924455aa4b6f`), build `op_0e00eeb679ba4bec`. The managed proof includes tags, the managed boundary and SHA-256 object-ID commit `2627094`.
 - [ ] Strict mailmap loading and reusable snapshot/parse/merge/entry operations — gix open_mailmap_into and the public mailmap snapshot surface remain uncovered.
 - [ ] Full Git signature time domain — the compatible GixSignature.When remains DateTimeOffset; gix i64 seconds and offsets outside .NET's range or with second precision are not yet representable.
-- [ ] Remote mutation, refspecs, URL resolution and defaults — `remote/{access,build,save}.rs`, `repository/config/remote.rs`.
+- [ ] Remote mutation, refspecs, URL builders/explicit rewrite controls and defaults — `remote/{access,build,save}.rs`, `repository/config/remote.rs`. Configured remote URL resolution is covered by GetRemotes(true).
 - [ ] Clone preparation, fetch, ref mapping and checkout with progress/cancellation/credentials — `lib.rs`, `clone/`, `remote/connect.rs`, `remote/connection/`.
 - [ ] Full worktree administration, including remove/lock/unlock/repair/move — `repository/worktree_admin.rs`.
 - [x] Fresh raw configuration loading — `config::Snapshot::reload` backs GetConfigString/TryGetConfigString and local edit preflight. Existing permissions, includes/includeIf, private git-dir/current branch, API/CLI precedence, cwd anchoring and malformed typed-value repair are covered; transaction `d461153e562eea7ec0b754bb`.
@@ -299,19 +299,21 @@ These groups come from the current public source under `gix/src`. Split a group 
 
 ### Boundary, delivery and completion
 
-- [ ] Complete named/multi-field Rust enum support in Interoptopus — `docs/csharp-multi-field-variants.md`; Steps 1–4 are done (`fcff19e78` completes Steps 3–4); Step 5 and an explicitly patched generator-suite launch remain.
+- [x] Key cached Rust compilation by exact checkout/build paths through `.kache.toml`: `CARGO_MANIFEST_DIR`, `CARGO_TARGET_DIR`, `CARGO_TARGET_TMPDIR` and `CARGO_BIN_EXE_*`. This addresses stale compile-time paths observed in preserved failed operation `09a21a49acdcfee82dd0e85673479479`; it keeps caching and every required gate enabled. In fresh transaction `6e1237640581f12b73f9a67e`, the remote family passed 50/50 after a single fixture prewarm, and focused corpus/filter/SSH-signature/merge/worktree tests passed. The unified workspace gate remains mandatory, including the date corpus that lacks a hash feature in an isolated package build.
+
+- [x] Complete named/multi-field Rust enum support in Interoptopus — Step 5 `380904ef`, 237 patched-runtime managed tests; consumed from 0.18.0 release `9c04f708`, whose exact gate `0d61e85d4943a1387a2f9bec52672c80` passed all four steps with zero uncovered changes.
 - [x] Make the GixError mapper exhaustive with generated case types and promote missing-case diagnostic CS8509 to an error; compiler probe and managed behavior verified.
 - [ ] P0b stable error envelope: Kind, extensible Code, retryability and actionable typed recovery detail.
 - [ ] P0c bounded structured cursors with terminal/error semantics and ownership-closure checks.
 - [x] Close the managed public-surface leakage invariant across methods, properties, records and nested/generic/array/by-ref types — transaction `475a8ce11774fbdc801a1e09`. The structural check covers public/protected nested declarations, fields, events, bases, interfaces, delegates and constraints. It caught and closed the generated `ReferenceUpdateOutcome` leak while preserving its public name, byte representation and three values. Validation against target `b49657f6c3bd913b559cb6158cd786f11c0cdd89` passed 66/66 native tests including generation (`ec2873a5b6426ac8ab9f658c137972ea`) and 86/86 patched-required managed tests (`op_39fb50b624104519`).
-- [ ] Replace sentinel-based HEAD state with the documented closed model once rich variants are supported.
+- [ ] Replace sentinel-based HEAD state with the documented closed model using the supported rich variants.
 - [ ] Complete resource/transaction ownership and callback/progress/cancellation/credential contracts for their affected families.
 - [ ] Complete native feature profiles, runtime capability bootstrap, shared inventory/API guard and exact managed/native version checks.
 - [ ] Complete RID packaging, clean package consumption and supported-platform validation — issue `2c6f1a0e`.
 - [ ] Complete CSharpMpc consumer migration and its full tests — issue `2c6f1a0f`.
 - [ ] Full gix coverage: every public capability accounted for, implemented through the managed boundary, validated, integrated and checked above.
 
-Latest validated expansion on 2026-09-05: identity/mailmap transaction `12351a13bee70d62d69cda3d` passed 82/82 gix-ffi native tests including generation (`5740e99bf32c4a7fb8ec68f8c58177aa`) and 97/97 GixSharp managed tests via PatchedCoreRun/corerun.exe (`op_be1c924455aa4b6f`); managed build `op_0e00eeb679ba4bec` succeeded after pulling target `2627094`. This includes seven native and five managed identity/mailmap tests, raw commit/note/tag signature round trips, real identity Option carriers and the whole-public-surface boundary checks. The preceding tags slice passed 75/92, boundary 66/86, configuration 66/82, notes 57/76, shallow 50/71, ignore/local-exclude 47/68 and diff/scalar 41/63. These totals are validation evidence, not a coverage percentage.
+Latest validated expansion on 2026-09-05: remotes and fork-consumption transaction `6e1237640581f12b73f9a67e` passed 87/87 gix-ffi native tests including generation (`6e6e3e9ef46cf8ba17cad31c6b5a23b5`) and 101/101 GixSharp managed tests via PatchedCoreRun/corerun.exe (`op_ea3d69e178e44396`); managed build `op_885e4fc0bbe14ee2` succeeded after pulling identity commit `649e35ae`. This includes five native and four managed remote tests, exact raw-byte names/URLs, fresh linked configuration, record ownership, and the whole-public-surface boundary checks. Cargo.lock changes exactly the five fork versions/checksums to 0.18.0 from `registry+file:///D:/feeds/LocalCargo/`. The preceding identity/mailmap slice passed 82/97, tags 75/92, boundary 66/86, configuration 66/82, notes 57/76, shallow 50/71, ignore/local-exclude 47/68 and diff/scalar 41/63. These totals are validation evidence, not a coverage percentage.
 
 ## Sequencing evidence
 
@@ -596,7 +598,7 @@ Objects and commit graph; index and conflicts; references and branches; diff and
 id: 2c6f1a09
 kind: issue
 severity: medium
-status: open
+status: closed
 ```
 
 ### Scope
@@ -605,7 +607,11 @@ Implement `GitRemote` and `GetRemotes`, including fetch and push URLs and multip
 
 ### Acceptance
 
-Missing URLs, insteadOf/pushInsteadOf resolution where the managed contract requires it, non-UTF-8 configuration bytes, and deterministic remote ordering are covered.
+- [x] Preserve the two-argument GitRemote record and parameterless GetRemotes method-group contract.
+- [x] Return owned raw-byte names and all fetch/push URLs in deterministic bytewise name order; text accessors decode UTF-8 with replacement.
+- [x] Keep missing fetch URLs null, preserve stored bytes by default, and apply gix insteadOf/pushInsteadOf rules only through the explicit resolution overload.
+- [x] Cover empty URL resets, repeated sections, bare repositories, fresh includes, linked-worktree config, unchanged timestamps, invalid configuration and ownership after disposal.
+- [x] Preserve distinct non-UTF-8 core remote keys and symbolic names without a Windows path-conversion panic. Name::Symbol now contains Cow<BStr>; as_symbol() remains Option<&str> and as_bstr() retains exact bytes.
 
 ### Dependencies
 
