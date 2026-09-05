@@ -41,6 +41,9 @@ impl<'repo> Tree<'repo> {
 
     /// Find the entry named `name` by iteration, or return `None` if it wasn't found.
     ///
+    /// This legacy best-effort lookup skips decoding errors. Use [Self::try_find_entry()]
+    /// when malformed input must be distinguished from a missing entry.
+    ///
     /// # Examples
     ///
     /// ```
@@ -61,6 +64,24 @@ impl<'repo> Tree<'repo> {
                 inner: entry,
                 repo: self.repo,
             })
+    }
+
+    /// Find an entry while checking the entire tree encoding, including bytes
+    /// after a matching entry. Returns an error for malformed data, even when
+    /// the requested name is absent. Semantic validation (ordering, duplicates,
+    /// modes and paths) is provided by the verified blob exporter.
+    pub fn try_find_entry(
+        &self,
+        name: impl PartialEq<BStr>,
+    ) -> Result<Option<EntryRef<'repo, '_>>, gix_object::decode::Error> {
+        let mut found = None;
+        for entry in self.iter() {
+            let entry = entry?;
+            if found.is_none() && name.eq(entry.filename()) {
+                found = Some(entry);
+            }
+        }
+        Ok(found)
     }
 
     /// Follow a sequence of `path` components starting from this instance, and look them up one by one until the last component

@@ -21,6 +21,8 @@ pub mod attributes;
 mod blame;
 /// Local branch operations.
 pub mod branch;
+/// Verified raw tree and blob export.
+pub mod blob_export;
 mod cache;
 #[cfg(feature = "worktree-mutation")]
 mod checkout;
