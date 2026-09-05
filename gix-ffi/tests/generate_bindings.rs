@@ -15,10 +15,10 @@ const OUT_DIR: &str = "bindings";
 
 /// C# namespace for all generated declarations.
 ///
-/// Without this everything lands in the global namespace, which is fine
-/// for a test harness and wrong for a shipped package: `Bool`, `Unit` and
-/// `Utf8String` would collide with consumer code.
-const NAMESPACE: &str = "GixSharp";
+/// This namespace is reserved for the generated implementation. The managed
+/// public-surface check identifies all generated types and nested cases by
+/// this boundary, without maintaining a fixed list of native resources.
+const NAMESPACE: &str = "GixSharp.Native";
 
 #[test]
 fn generate_csharp_bindings() -> Result<(), Box<dyn std::error::Error>> {

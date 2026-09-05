@@ -175,3 +175,24 @@ mod peel_to_entry {
         Ok(())
     }
 }
+
+#[test]
+fn strict_find_rejects_corruption_after_a_match_or_a_missing_name() -> crate::Result {
+    let repo = named_repo("make_basic_repo.sh")?;
+    for kind in [gix::hash::Kind::Sha1, gix::hash::Kind::Sha256] {
+        let mut bytes = b"100644 target\0".to_vec();
+        bytes.extend_from_slice(kind.empty_blob().as_bytes());
+        let valid = gix::Tree::from_data(kind.empty_tree(), bytes.clone(), &repo);
+        assert!(valid.try_find_entry("target")?.is_some());
+        assert!(valid.try_find_entry("absent")?.is_none());
+        for suffix in [b"broken".as_slice(), b"100644 truncated\0"] {
+            let mut corrupt = bytes.clone();
+            corrupt.extend_from_slice(suffix);
+            let tree = gix::Tree::from_data(kind.empty_tree(), corrupt, &repo);
+            assert!(tree.find_entry("target").is_some(), "legacy best-effort API");
+            assert!(tree.try_find_entry("target").is_err(), "must consume the trailing bytes");
+            assert!(tree.try_find_entry("absent").is_err(), "corruption is not absence");
+        }
+    }
+    Ok(())
+}

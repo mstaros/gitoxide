@@ -5,7 +5,8 @@ Status updated on 2026-09-05. The earlier foundation was verified at
 integrated as `22c1da14`, followed by ignore/local-exclude at `c051d784`.
 The shallow boundary/location slice is recorded in transaction
 `617a0c2ea46d9ae649f97241` and integrated as `24b9b9e9`. Notes compatibility
-is recorded in transaction `ecab46028c7fc71d74eda427`.
+is integrated as `ee8ffcb7`. Configuration compatibility is recorded in transaction
+`d461153e562eea7ec0b754bb`.
 The completion goal is full public gix coverage, confirmed by the user.
 Use the checkboxes here for boundary work and the implementation checklist in
 `../Issues.md` for method/domain coverage. Historical prototype counts and examples
@@ -15,7 +16,7 @@ below are design context, not current progress totals.
 
 A .NET binding over gitoxide (`gix`) targeting **full gix coverage**.
 
-**Status: implementation in progress.** Both layers work end to end. Eight
+**Status: implementation in progress.** Both layers work end to end. Nine
 initial compatibility slices are complete, with additional gix methods still to
 implement. Full gix coverage includes methods being added to the fork in parallel.
 Independent methods continue while their applicable boundary contracts are completed.
@@ -48,6 +49,15 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   and RemoveNote with owned note/signature bytes, default/custom refs, guarded
   direct/symbolic updates and Git comparisons. Remaining platform controls and
   general note cursors stay unchecked in the full-coverage checklist.
+- [x] Configuration compatibility slice: GetConfigString, TryGetConfigString,
+  SetConfigString and DeleteConfigValue. Fresh raw Snapshot::reload preserves
+  includes, permissions and precedence; linked git-dir conditions use the private
+  directory. Raw reads, HEAD lookups, locks and writes retain the opening cwd.
+  Atomic writes/deletes use common local config and reject repeated or included
+  keys. Raw values remain readable and repairable after an invalid typed setting;
+  successful persistence remains successful if typed reopening fails, with other
+  operations retaining prior cached settings until a valid refresh. Valid identity
+  writes refresh later commits on the same handle.
 - [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
 - [x] GetShallowCommits, ShallowFilePath and raw-byte ShallowFile. Owned snapshots
   read through `gix-shallow` directly, avoiding mtime-only cache staleness; empty,
@@ -60,12 +70,14 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   0.17.1 from registry `local`.
 - [x] Fresh-index status/staging correction integrated at `b3f28217`;
   retained foundation validation: 31/31 native tests and 54/54 managed tests.
-- [x] Expansion validation: 57/57 native tests, operation
-  `0db74891c6d7e07ac89ae654a3210b31`; 76/76 managed tests via
-  PatchedCoreRun/corerun.exe, operation `op_a6e1ec1ac720430d`; managed build
-  `op_6165c83baf3047e2` succeeded. The preceding shallow slice passed 50 native
-  and 71 managed tests (`op_88bad4eb45094c28`); ignore passed 47 native and
-  68 managed tests; diff/scalar passed 41 native and 63 managed.
+- [x] Expansion validation: 66/66 native tests, operation
+  `44573d676596122f55e49dc04bd22592`; 82/82 managed tests via
+  PatchedCoreRun/corerun.exe, operation `op_d83d8f99218340ad`; managed build
+  `op_d044f50e2bc94ac4` succeeded. Includes, private git-dir conditions,
+  malformed typed-value repair and process cwd changes are covered. Preceding
+  notes passed 57 native and 76 managed tests; shallow passed 50 native and
+  71 managed; ignore passed 47 native and 68 managed; diff/scalar passed
+  41 native and 63 managed.
 - [ ] Complete every remaining public gix capability in the `../Issues.md`
   implementation checklist, including additions made in parallel.
 - [ ] Complete the remaining boundary, profile and delivery checks below.
@@ -91,7 +103,7 @@ gix-ffi/
   tests/generate_bindings.rs   generates Interop.cs (a test, not build.rs)
   bindings/
     GixSharp.slnx       solution, tests in a /tests/ folder
-    Interop.cs          GENERATED, committed, namespace GixSharp
+    Interop.cs          GENERATED, committed, namespace GixSharp.Native
     GixSharp/
       GixSharp.csproj   packable class library, builds the cdylib
       Managed/          HAND-WRITTEN managed layer, partial GixRepository
@@ -140,17 +152,19 @@ for `blocking-client` + `async-client` together.
    envelope before cursor/error semantics or breadth: small semantic `Kind`,
    extensible machine-readable `Code`, orthogonal retryability, diagnostic
    message, and structured detail only where callers need recovery operands.
-8. **Nothing generated escapes the hand-written managed API.** The current
-   `ManagedRepositorySignatures_DoNotExposeGeneratedResources` reflection test
-   proves this only for public `GixRepository` method signatures and a fixed set
-   of generated top-level types. That is sufficient for the current POC but not
-   the final invariant. Before generated union cases are enabled, extend the
-   check across the complete hand-written public surface (methods, properties,
-   constructors/record shapes and nested generic/array/by-ref signature types)
-   and make generated-type detection include nested `*Case` types without
-   hand-enumerating every case. Generated C# 15 union cases remain internal
-   implementation detail unless the hand-written API deliberately defines its
-   own public sum type.
+8. **Nothing generated escapes the hand-written managed API.**
+   `ManagedApiBoundaryTests` inspects the entire public/protected managed
+   surface, including externally accessible nested declarations, methods,
+   properties/indexers, constructors/records, fields, events, bases, interfaces,
+   delegates and generic constraints. Signature traversal follows nested generic,
+   array, pointer and by-ref types. Generated types and nested cases are identified
+   structurally through the reserved `GixSharp.Native` namespace; no fixed list
+   of resources or case names is maintained. Regression probes demonstrate that
+   leaks are rejected. `ReferenceUpdateOutcome` is now a hand-written managed
+   enum with its existing public name, byte representation and values preserved;
+   native outcomes are explicitly translated and unknown values are rejected.
+   Generated C# 15 union cases remain implementation details; deliberate public
+   sum types belong to the hand-written managed contract.
 9. **One managed/FFI surface, multiple native engines.** Build-profile
    differences must not add/remove FFI functions, records or enum variants.
    Every native artifact shipped in one package version must have the same
@@ -675,8 +689,13 @@ checkboxes for unfinished work.
 - [x] Regenerate GixSharp against the fork's completed union projection.
 - [x] Replace the non-exhaustive GixError property-pattern mapper with generated
   case-type matching; validate missing-case compiler errors and managed ownership.
-- [ ] Extend the managed public-signature invariant beyond its fixed top-level
-  resource set to all public shapes and nested generated case types.
+- [x] Extend the managed public-signature invariant to all public/protected shapes
+  and nested generated case types — transaction `475a8ce11774fbdc801a1e09`.
+  Combined validation against target `b49657f6` passed 66/66 native tests including
+  generation (`ec2873a5b6426ac8ab9f658c137972ea`) and 86/86 patched-required
+  managed tests (`op_39fb50b624104519`), including deliberate leak probes and the
+  existing byte-stream behavior. Regenerated output differs from that target
+  only in its two namespace lines; the native inventory guard is unchanged.
 - [ ] Implement the semantic error envelope and actionable recovery detail.
 - [ ] Redesign HEAD state after the required named/multi-field support is ready.
 - [ ] Complete remaining internal Option/Result cleanup while preserving the
@@ -879,8 +898,8 @@ slice with its validation evidence.
 - [ ] Implement P0c: bounded batched cursors, final/error outcomes, single-consumer
   behavior and ownership-closure enforcement. Preserve existing materializing
   conveniences over streaming where needed.
-- [ ] Establish a managed public-API baseline and complete the public-signature
-  leakage checks.
+- [ ] Establish a managed public-API compatibility baseline. The separate
+  public-signature leakage invariant is complete above.
 - [ ] Implement explicit native profiles with both hash algorithms, runtime
   capabilities and inventory/API-guard equivalence across released engines.
 - [ ] Generalize RID staging and verify clean package consumption on supported
