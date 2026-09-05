@@ -267,6 +267,46 @@ fn update_index_changes_only_tracked_paths_and_refresh_reads_the_physical_file()
     ok(repo.refresh_index());
 }
 
+/// A commit must build its tree from the index on disk, not from a snapshot cached
+/// before the last write. The cache is invalidated only by a strictly newer mtime, so
+/// pinning the timestamp reproduces deterministically what a fast machine hits by chance.
+#[test]
+fn commit_uses_the_index_on_disk_when_its_timestamp_is_unchanged() {
+    let (root, repo) = new_repo("commit-stale-cache");
+    write(&root.0, "first.txt", b"first\n");
+    stage(&repo, b"");
+
+    // Populate the repository's cached index snapshot at the current mtime.
+    assert!(ffi_entries(&repo).contains_key(b"first.txt".as_slice()));
+    let index_path = root.0.join(".git/index");
+    let pinned = std::fs::metadata(&index_path)
+        .expect("stat index")
+        .modified()
+        .expect("index mtime");
+
+    write(&root.0, "second.txt", b"second\n");
+    stage(&repo, b"");
+    std::fs::File::options()
+        .write(true)
+        .open(&index_path)
+        .expect("open index to pin its timestamp")
+        .set_times(std::fs::FileTimes::new().set_modified(pinned))
+        .expect("pin index mtime");
+
+    let id = commit(&repo, "both files", false);
+
+    let direct = gix::open(&root.0).expect("open repository directly");
+    let tree = direct
+        .find_commit(gix::ObjectId::from_hex(id.as_bytes()).expect("valid commit id"))
+        .expect("find commit")
+        .tree()
+        .expect("commit tree");
+    assert!(
+        tree.find_entry("second.txt").is_some(),
+        "the commit built its tree from a stale cached index"
+    );
+}
+
 #[test]
 fn unstage_restores_head_or_removes_entries_when_head_is_unborn() {
     let (root, repo) = new_repo("unstage");

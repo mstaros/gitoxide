@@ -15,9 +15,27 @@ pub struct IndexEntryRecord {
     pub stage: u32,
 }
 
-fn owned_index(repo: &gix::Repository) -> Result<gix::index::File, GixError> {
-    let index = repo.index_or_empty().map_err(|err| other(&err))?;
-    Ok(gix::index::File::clone(&index))
+/// Read the index from disk, bypassing `Repository`'s cached snapshot.
+///
+/// `index_or_empty` returns a snapshot invalidated only when the index file's mtime is
+/// strictly newer than the cached one (`gix-fs/src/snapshot.rs`). Every mutation here
+/// writes a cloned `index::File` without invalidating that cache, so a read following a
+/// write within one filesystem timestamp tick returns pre-write data. The cache is sound
+/// for observing a file someone else writes; it is the wrong tool for reading back our own.
+///
+/// `open_index` errors when no index file exists, so the unborn case falls back to an
+/// empty index exactly as `try_index` does internally.
+pub(crate) fn owned_index(repo: &gix::Repository) -> Result<gix::index::File, GixError> {
+    match repo.open_index() {
+        Ok(index) => Ok(index),
+        Err(gix::worktree::open_index::Error::IndexFile(
+            gix::index::file::init::Error::Io(err),
+        )) if err.kind() == std::io::ErrorKind::NotFound => Ok(gix::index::File::from_state(
+            gix::index::State::new(repo.object_hash()),
+            repo.index_path(),
+        )),
+        Err(err) => Err(other(&err)),
+    }
 }
 
 fn write_index(
@@ -235,7 +253,7 @@ pub(crate) fn refresh(repo: &gix::Repository) -> Result<(), GixError> {
 pub(crate) fn entries(
     repo: &gix::Repository,
 ) -> Result<Vec<IndexEntryRecord>, GixError> {
-    let index = repo.index_or_empty().map_err(|err| other(&err))?;
+    let index = owned_index(repo)?;
     Ok(index
         .entries()
         .iter()
