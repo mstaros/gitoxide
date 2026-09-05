@@ -70,22 +70,35 @@ public sealed class ObjectsCommitGraphTests
     }
 
     [Test]
-    public async Task ObjectIds_ValidateSha1AndNormalizeHex()
+    public async Task ObjectIds_ValidateFullSha1AndSha256AndNormalizeHex()
     {
-        var uppercase = new GixObjectId("ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD");
+        foreach (var length in new[] { 40, 64 })
+        {
+            var uppercase = new string('A', length - 1) + "F";
+            var expected = new string('a', length - 1) + "f";
+            var objectId = new GixObjectId(uppercase);
 
-        await Assert.That(uppercase.Value)
-            .IsEqualTo("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
-        await Assert.That(() => new GixObjectId(" "))
-            .Throws<ArgumentException>();
-        await Assert.That(() => new GixObjectId("abc"))
-            .Throws<FormatException>();
-        await Assert.That(() => new GixObjectId(
-                "0000000000000000000000000000000000000000000000000000000000000000"))
-            .Throws<FormatException>();
-        await Assert.That(() => new GixObjectId(
-                "gggggggggggggggggggggggggggggggggggggggg"))
-            .Throws<FormatException>();
+            await Assert.That(objectId.Value).IsEqualTo(expected);
+            await Assert.That(objectId.ToString()).IsEqualTo(expected);
+            await Assert.That(objectId).IsEqualTo(new GixObjectId(expected));
+            await Assert.That(new GixObjectId(new string('0', length)).Value)
+                .IsEqualTo(new string('0', length));
+
+            await Assert.That(() => new GixObjectId(new string('a', length - 1) + "g"))
+                .Throws<FormatException>();
+            await Assert.That(() => new GixObjectId(new string('a', length - 1) + " "))
+                .Throws<FormatException>();
+            await Assert.That(() => new GixObjectId(new string('\uFF10', length)))
+                .Throws<FormatException>();
+        }
+
+        foreach (var length in new[] { 1, 39, 41, 63, 65 })
+            await Assert.That(() => new GixObjectId(new string('a', length)))
+                .Throws<FormatException>();
+
+        await Assert.That(() => new GixObjectId(null!)).Throws<ArgumentNullException>();
+        await Assert.That(() => new GixObjectId(string.Empty)).Throws<ArgumentException>();
+        await Assert.That(() => new GixObjectId(" ")).Throws<ArgumentException>();
     }
 
     [Test]

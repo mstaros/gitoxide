@@ -1,18 +1,18 @@
 namespace GixSharp;
 
-/// <summary>A validated SHA-1 Git object identifier.</summary>
+/// <summary>A validated full SHA-1 or SHA-256 Git object identifier.</summary>
 public readonly record struct GixObjectId
 {
     public GixObjectId(string value)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(value);
-        if (value.Length != 40 || value.Any(static character => !Uri.IsHexDigit(character)))
-            throw new FormatException("A Git object ID must contain exactly 40 hexadecimal characters.");
+        if (value.Length is not (40 or 64) || value.Any(static character => !Uri.IsHexDigit(character)))
+            throw new FormatException("A Git object ID must contain exactly 40 (SHA-1) or 64 (SHA-256) hexadecimal characters.");
 
         Value = value.ToLowerInvariant();
     }
 
-    /// <summary>Gets the lowercase 40-character hexadecimal identifier.</summary>
+    /// <summary>Gets the complete lowercase hexadecimal identifier.</summary>
     public string Value { get; }
 
     public override string ToString() => Value;
