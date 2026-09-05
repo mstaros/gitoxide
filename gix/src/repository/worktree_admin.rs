@@ -1199,11 +1199,12 @@ fn branch_held_by_in_progress_operation(git_dir: &Path) -> Option<gix_ref::FullN
     }
 
     // `BISECT_LOG` marks a bisect as running; `BISECT_START` names the branch it began on, or
-    // holds a commit id when the bisect started from a detached head.
+    // holds a commit id when the bisect started from a detached head — which git's `get_branch`
+    // renders as an abbreviated hash rather than a branch, so a commit id holds nothing.
     if git_dir.join("BISECT_LOG").is_file() {
         if let Ok(contents) = std::fs::read(git_dir.join("BISECT_START")) {
             let start = contents.trim();
-            if !start.is_empty() {
+            if !start.is_empty() && gix_hash::ObjectId::from_hex(start).is_err() {
                 let mut full = BString::from("refs/heads/");
                 full.extend_from_slice(start);
                 if let Ok(name) = gix_ref::FullName::try_from(full.as_bstr()) {

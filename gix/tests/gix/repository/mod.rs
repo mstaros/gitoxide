@@ -31,6 +31,7 @@ mod state;
 #[cfg(feature = "attributes")]
 mod submodule;
 mod worktree;
+mod worktree_admin;
 
 #[cfg(feature = "revision")]
 mod revision {
