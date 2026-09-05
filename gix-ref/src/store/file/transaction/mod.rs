@@ -84,10 +84,9 @@ impl std::borrow::BorrowMut<RefEdit> for Edit {
 
 /// Edits
 impl file::Store {
-    /// Open a transaction with the given `edits`, and determine how to fail if a `lock` cannot be obtained.
-    /// A snapshot of packed references will be obtained automatically if needed to fulfill this transaction
-    /// and will be provided as result of a successful transaction. Note that upon transaction failure, packed-refs
-    /// will never have been altered.
+    /// Open a transaction whose edits and lock behavior are supplied to [Transaction::prepare()].
+    /// Preparing obtains a packed-reference snapshot if needed without publishing changes.
+    /// Once [Transaction::commit()] starts, an I/O failure can leave partial changes; see [commit::Error::PartialCommit].
     ///
     /// The transaction inherits the parent namespace.
     pub fn transaction(&self) -> Transaction<'_, '_> {

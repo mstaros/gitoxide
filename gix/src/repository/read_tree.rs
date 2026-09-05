@@ -8,7 +8,7 @@ use gix_error::{ErrorExt, Exn};
 
 use crate::{
     Repository,
-    bstr::{BString, ByteSlice},
+    bstr::{BStr, BString, ByteSlice},
     repository::sparse_checkout,
 };
 
@@ -138,8 +138,8 @@ fn validate(trees: &[gix_hash::ObjectId], options: &Options) -> Result<(), Error
     Ok(())
 }
 
-fn entries(index: &gix_index::File) -> BTreeMap<BString, gix_index::Entry> {
-    index.entries().iter().map(|entry| (entry.path(index).to_owned(), entry.clone())).collect()
+fn entries(index: &gix_index::File) -> BTreeMap<&BStr, &gix_index::Entry> {
+    index.entries().iter().map(|entry| (entry.path(index), entry)).collect()
 }
 
 fn same(left: Option<&gix_index::Entry>, right: Option<&gix_index::Entry>) -> bool {
@@ -208,7 +208,7 @@ impl Repository {
         let new_entries = entries(&new);
         let current_entries = entries(&current);
         let paths: BTreeSet<_> = old_entries.keys().chain(new_entries.keys())
-            .chain(current_entries.keys()).cloned().collect();
+            .chain(current_entries.keys()).map(|path| (*path).to_owned()).collect();
         let initial = current.entries().is_empty();
         let mut changes = BTreeMap::new();
         let mut conflicts = Vec::new();
@@ -216,9 +216,9 @@ impl Repository {
         // Compare entry values independently of path traversal and filesystem state.
         // Unchanged target paths and already-staged target values carry forward.
         for path in paths {
-            let before = old_entries.get(&path);
-            let after = new_entries.get(&path);
-            let staged = current_entries.get(&path);
+            let before = old_entries.get(path.as_bstr()).copied();
+            let after = new_entries.get(path.as_bstr()).copied();
+            let staged = current_entries.get(path.as_bstr()).copied();
             if unmerged.contains(&path) {
                 changes.insert(path, after.cloned());
             } else if staged.is_some() {
@@ -288,7 +288,7 @@ impl Repository {
         if let Some(workdir) = workdir {
             let mut candidates = Vec::new();
             let removable: BTreeSet<BString> = changes.keys()
-                .filter(|path| current_entries.contains_key(*path))
+                .filter(|path| current_entries.contains_key(path.as_bstr()))
                 .map(|path| if self.config.ignore_case { path.to_ascii_lowercase().into() } else { path.clone() })
                 .collect();
             let mut excludes = self.excludes(
@@ -299,12 +299,12 @@ impl Repository {
             let positions: BTreeMap<_, _> = current.entries().iter().enumerate()
                 .map(|(idx, entry)| (entry.path(&current), idx)).collect();
             for (path, replacement) in &changes {
-                let before = current_entries.get(path);
+                let before = current_entries.get(path.as_bstr()).copied();
                 let both_skipped = before.is_some_and(skipped) && replacement.as_ref().is_none_or(skipped);
                 if both_skipped {
                     continue;
                 }
-                let mode = replacement.as_ref().or(before).or_else(|| old_entries.get(path))
+                let mode = replacement.as_ref().or(before).or_else(|| old_entries.get(path.as_bstr()).copied())
                     .expect("a changed path occurs in at least one input").mode;
                 let disk_path = sparse_checkout::entry_worktree_path(self, workdir, path.as_bstr(), mode)
                     .map_err(|err| prepare("validate worktree path", err))?;
