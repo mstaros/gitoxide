@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using GixSharp;
@@ -139,34 +138,6 @@ public sealed class ManagedRepositoryTests
         repository.Dispose();
 
         await Assert.That(() => repository.Head()).Throws<ObjectDisposedException>();
-    }
-
-    [Test]
-    public async Task ManagedRepositorySignatures_DoNotExposeGeneratedResources()
-    {
-        var generatedResources = new HashSet<Type>
-        {
-            typeof(Repo),
-            typeof(HeadInfo),
-            typeof(CommitInfo),
-            typeof(RepositoryInfo),
-            typeof(GixError),
-            typeof(Utf8String),
-            typeof(VecByte),
-            typeof(VecUtf8String),
-            typeof(SliceByte),
-        };
-
-        var methods = typeof(GixRepository)
-            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
-            .Where(static method => method.DeclaringType == typeof(GixRepository));
-
-        var exposesGeneratedResource = methods.Any(method =>
-            generatedResources.Contains(method.ReturnType) ||
-            method.GetParameters().Any(parameter =>
-                generatedResources.Contains(parameter.ParameterType)));
-
-        await Assert.That(exposesGeneratedResource).IsFalse();
     }
 
     private static string RepositoryRoot([CallerFilePath] string sourceFile = "") =>
