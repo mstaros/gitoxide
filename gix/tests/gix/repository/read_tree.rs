@@ -476,3 +476,57 @@ fn an_apply_failure_reports_recovery_and_preserves_the_old_index() -> crate::Res
     assert!(root.path().join("new.txt").is_file(), "failure happened after an earlier file was applied");
     Ok(())
 }
+
+#[test]
+#[ignore = "opt-in timing measurement; writes gix/target/read-tree-measurement.csv"]
+fn measure_index_only_transitions() -> crate::Result {
+    use std::{fmt::Write, time::Instant};
+
+    let mut report = String::from("entries,samples,min_ms,median_ms,max_ms\n");
+    for count in [1_000, 10_000, 100_000] {
+        let root = gix_testtools::tempfile::TempDir::new()?;
+        let repo = gix::init(root.path())?;
+        let old_blob = repo.write_blob(b"baseline\n")?.detach();
+        let new_blob = repo.write_blob(b"changed\n")?.detach();
+        let mut tree = gix::objs::Tree {
+            entries: (0..count)
+                .map(|idx| gix::objs::tree::Entry {
+                    mode: gix::objs::tree::EntryKind::Blob.into(),
+                    filename: format!("file-{idx:06}.txt").into(),
+                    oid: old_blob,
+                })
+                .collect(),
+        };
+        let old = repo.write_object(&tree)?.detach();
+        tree.entries[count / 2].oid = new_blob;
+        let new = repo.write_object(&tree)?.detach();
+        let options = Options { index_only: true, ..Default::default() };
+        repo.read_tree(&[old, old], options.clone())?;
+        // Warm both directions; fixture and tree construction are outside the measurements.
+        repo.read_tree(&[old, new], options.clone())?;
+        repo.read_tree(&[new, old], options.clone())?;
+        let mut elapsed = Vec::with_capacity(20);
+        for _ in 0..10 {
+            for trees in [[old, new], [new, old]] {
+                let start = Instant::now();
+                let outcome = repo.read_tree(&trees, options.clone())?;
+                elapsed.push(start.elapsed());
+                assert_eq!(outcome.index_paths.len(), 1);
+                assert!(outcome.worktree_paths.is_empty());
+            }
+        }
+        elapsed.sort_unstable();
+        writeln!(
+            report, "{count},{},{:.3},{:.3},{:.3}",
+            elapsed.len(),
+            elapsed[0].as_secs_f64() * 1_000.0,
+            (elapsed[9].as_secs_f64() + elapsed[10].as_secs_f64()) * 500.0,
+            elapsed[19].as_secs_f64() * 1_000.0,
+        )?;
+    }
+    let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/read-tree-measurement.csv");
+    std::fs::create_dir_all(output.parent().expect("measurement has a parent"))?;
+    std::fs::write(&output, &report)?;
+    eprintln!("{}\n{report}", output.display());
+    Ok(())
+}
