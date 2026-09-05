@@ -51,6 +51,9 @@ default = ["max-performance-safe", "comfort", "basic", "extras", "auto-chain-err
 #! A bundle is a set of related feature toggles which can be activated with a single name that acts as a group.
 #! Bundles are for convenience only and bear no further meaning beyond the cargo manifest file.
 
+## Local repository operations for transactional consumers, without a network client.
+porcelain = ["index", "status", "attributes", "excludes", "worktree-mutation", "revision", "merge", "sha1", "sha256"]
+
 ## More fundamental components that most will be able to make good use of.
 basic = ["blob-diff", "revision", "index"]
 

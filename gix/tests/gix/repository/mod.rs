@@ -26,6 +26,8 @@ mod reference;
 mod remote;
 mod shallow;
 #[cfg(feature = "worktree-mutation")]
+mod read_tree;
+#[cfg(feature = "worktree-mutation")]
 mod sparse_checkout;
 mod state;
 #[cfg(feature = "attributes")]
