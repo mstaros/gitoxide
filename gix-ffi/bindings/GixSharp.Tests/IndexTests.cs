@@ -7,6 +7,33 @@ namespace GixSharp.Tests;
 public sealed class IndexTests
 {
     [Test]
+    public async Task RepeatedStatusAndStage_UseCurrentIndexWithAnUnchangedTimestamp()
+    {
+        using var fixture = new TempRepository();
+        Write(fixture.Root, "tracked.txt", "baseline\n");
+        fixture.Repository.Stage();
+        _ = Commit(fixture.Repository, "baseline");
+        var baselineTree = fixture.Repository.WriteIndexTree();
+        await Assert.That(fixture.Repository.GetStatus()).IsEmpty();
+        var indexPath = Path.Combine(fixture.Repository.RepositoryPath, "index");
+        var pinned = File.GetLastWriteTimeUtc(indexPath);
+
+        Write(fixture.Root, "tracked.txt", "staged content with a different size\n");
+        fixture.Repository.Stage("tracked.txt");
+        File.SetLastWriteTimeUtc(indexPath, pinned);
+        var staged = fixture.Repository.GetStatus().Single();
+
+        Write(fixture.Root, "tracked.txt", "baseline\n");
+        fixture.Repository.Stage("tracked.txt");
+        var restoredTree = fixture.Repository.WriteIndexTree();
+        var restoredStatus = fixture.Repository.GetStatus();
+
+        await Assert.That(staged.Status).IsEqualTo(GitFileStatus.ModifiedInIndex);
+        await Assert.That(restoredTree).IsEqualTo(baselineTree);
+        await Assert.That(restoredStatus).IsEmpty();
+    }
+
+    [Test]
     public async Task Stage_HandlesPathspecsIgnoredFilesDeletionsAndRawPaths()
     {
         using var fixture = new TempRepository();

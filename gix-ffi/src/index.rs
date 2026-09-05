@@ -20,8 +20,8 @@ pub struct IndexEntryRecord {
 /// `index_or_empty` returns a snapshot invalidated only when the index file's mtime is
 /// strictly newer than the cached one (`gix-fs/src/snapshot.rs`). Every mutation here
 /// writes a cloned `index::File` without invalidating that cache, so a read following a
-/// write within one filesystem timestamp tick returns pre-write data. The cache is sound
-/// for observing a file someone else writes; it is the wrong tool for reading back our own.
+/// write within one filesystem timestamp tick can return pre-write data. Status, staging,
+/// filtering, index inspection and commit creation must all use the physical index.
 ///
 /// `open_index` errors when no index file exists, so the unborn case falls back to an
 /// empty index exactly as `try_index` does internally.
@@ -83,17 +83,25 @@ fn update_from_worktree(
     pathspecs: &[u8],
     tracked_only: bool,
 ) -> Result<(), GixError> {
-    let records = crate::status::collect(
+    let mut index = owned_index(repo)?;
+    let records = crate::status::collect_with_index(
         repo,
         crate::status::SHOW_WORKTREE_ONLY,
         crate::status::INCLUDE_UNTRACKED
             | crate::status::RECURSE_UNTRACKED_DIRECTORIES,
         pathspecs,
+        index.clone(),
     )?;
-    let mut index = owned_index(repo)?;
     let tracked_before = tracked_paths(&index);
-    let (mut pipeline, pipeline_index) =
-        repo.filter_pipeline(None).map_err(|err| other(&err))?;
+    let pipeline_index = index.clone();
+    let attributes = repo
+        .attributes_only(
+            &pipeline_index,
+            gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+        )
+        .map_err(|err| other(&err))?;
+    let mut pipeline = gix::filter::Pipeline::new(repo, attributes.detach())
+        .map_err(|err| other(&err))?;
     let mut entries_changed = false;
 
     for record in records {

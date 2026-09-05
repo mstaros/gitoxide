@@ -76,11 +76,6 @@ fn new_repo(label: &str) -> (TempDir, Repo) {
     (root, repo)
 }
 
-fn reopen(root: &Path) -> Repo {
-    let path = bytes(root);
-    ok(Repo::open(ffi::Slice::from_slice(&path)))
-}
-
 fn stage(repo: &Repo, pathspecs: &[u8]) {
     ok(repo.stage(ffi::Slice::from_slice(pathspecs)));
 }
@@ -135,6 +130,95 @@ fn direct_blob(root: &Path, id: gix::ObjectId) -> Vec<u8> {
         .expect("load blob directly")
         .data
         .to_vec()
+}
+
+fn pin_index_timestamp(index_path: &Path, modified: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(index_path)
+        .expect("open index to pin its timestamp")
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("pin index mtime");
+}
+
+#[test]
+fn repeated_staging_reads_the_current_index_when_timestamp_is_unchanged() {
+    let (root, repo) = new_repo("stage-stale-cache");
+    write(&root.0, "tracked.txt", b"baseline\n");
+    stage(&repo, b"");
+    let baseline_blob_id = direct_entry(&root.0, b"tracked.txt").0;
+    let _ = commit(&repo, "baseline", false);
+    assert!(
+        ok(repo.status(0, 0, ffi::Slice::from_slice(b"")))
+            .into_vec()
+            .is_empty()
+    );
+    let index_path = root.0.join(".git/index");
+    let pinned = std::fs::metadata(&index_path)
+        .expect("stat index")
+        .modified()
+        .expect("mtime");
+
+    write(&root.0, "tracked.txt", b"staged content with a different size\n");
+    stage(&repo, b"tracked.txt");
+    pin_index_timestamp(&index_path, pinned);
+    write(&root.0, "tracked.txt", b"baseline\n");
+    stage(&repo, b"tracked.txt");
+
+    assert_eq!(
+        direct_entry(&root.0, b"tracked.txt").0,
+        baseline_blob_id,
+        "staging again replaces the on-disk entry even when the worktree matches an older snapshot"
+    );
+    let commit_id = commit(&repo, "restored baseline", true);
+    let direct = gix::open(&root.0).expect("open result with an independent handle");
+    let tree = direct
+        .find_commit(gix::ObjectId::from_hex(commit_id.as_bytes()).expect("commit id"))
+        .expect("find commit")
+        .tree()
+        .expect("commit tree");
+    assert_eq!(
+        tree.find_entry("tracked.txt")
+            .expect("tracked file is committed")
+            .id()
+            .detach(),
+        baseline_blob_id
+    );
+}
+
+#[test]
+fn staging_filters_use_the_current_index_attributes_with_unchanged_timestamp() {
+    let (root, repo) = new_repo("filter-stale-cache");
+    write(&root.0, ".gitattributes", b"*.txt -text\n");
+    write(&root.0, "value.txt", b"baseline\r\n");
+    stage(&repo, b"");
+    let _ = commit(&repo, "baseline", false);
+    let _ = ok(repo.status(0, 0, ffi::Slice::from_slice(b"")));
+    let index_path = root.0.join(".git/index");
+    let pinned = std::fs::metadata(&index_path)
+        .expect("stat index")
+        .modified()
+        .expect("mtime");
+
+    write(&root.0, ".gitattributes", b"*.txt text eol=lf\n");
+    stage(&repo, b".gitattributes");
+    pin_index_timestamp(&index_path, pinned);
+    std::fs::remove_file(root.0.join(".gitattributes")).expect("force attribute lookup through the index");
+    write(&root.0, "value.txt", b"changed content\r\n");
+    stage(&repo, b"value.txt");
+
+    let actual = direct_blob(&root.0, direct_entry(&root.0, b"value.txt").0);
+    assert_eq!(
+        actual, b"changed content\n",
+        "the clean filter uses the newly staged attributes"
+    );
+    let baseline = std::process::Command::new("git")
+        .current_dir(&root.0)
+        .args(["add", "value.txt"])
+        .output()
+        .expect("run Git's clean filter");
+    assert!(baseline.status.success(), "Git accepts the same staging operation");
+    assert_eq!(direct_blob(&root.0, direct_entry(&root.0, b"value.txt").0), actual);
 }
 
 #[test]
@@ -200,7 +284,7 @@ fn stage_records_deletions_resolves_intent_to_add_and_respects_index_locks() {
         std::fs::read(root.0.join(".git/index")).expect("read index after lock failure"),
         before_lock
     );
-    assert!(!ffi_entries(&reopen(&root.0)).contains_key(b"locked.txt".as_slice()));
+    assert!(!ffi_entries(&repo).contains_key(b"locked.txt".as_slice()));
     std::fs::remove_file(root.0.join(".git/index.lock")).expect("remove index lock");
 
     // Seed an intent-to-add entry with gix plumbing, then prove Stage replaces
@@ -218,8 +302,7 @@ fn stage_records_deletions_resolves_intent_to_add_and_respects_index_locks() {
     index.sort_entries();
     index.remove_tree();
     index.write(Default::default()).expect("write intent entry");
-    let refreshed = reopen(&root.0);
-    stage(&refreshed, b"intent.txt");
+    stage(&repo, b"intent.txt");
     let (intent_id, _, intent_flags) = direct_entry(&root.0, b"intent.txt");
     assert_ne!(intent_id, gix::ObjectId::empty_blob(direct.object_hash()));
     assert!(!intent_flags.contains(gix::index::entry::Flags::INTENT_TO_ADD));
@@ -376,7 +459,6 @@ fn conflicts_keep_all_stages_block_write_tree_and_can_resolve_as_deleted() {
     stage(&repo, b"");
     let _ = commit(&repo, "baseline", false);
     inject_conflict(&root.0, b"conflict.txt");
-    let repo = reopen(&root.0);
 
     assert_eq!(
         ffi_entries(&repo).get(b"conflict.txt".as_slice()),
@@ -390,7 +472,7 @@ fn conflicts_keep_all_stages_block_write_tree_and_can_resolve_as_deleted() {
         ffi::Err(_)
     ));
     assert_eq!(
-        ffi_entries(&reopen(&root.0)).get(b"conflict.txt".as_slice()),
+        ffi_entries(&repo).get(b"conflict.txt".as_slice()),
         Some(&vec![1, 2, 3])
     );
     std::fs::remove_file(root.0.join(".git/index.lock")).expect("remove index lock");

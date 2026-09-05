@@ -367,6 +367,13 @@ fn configure_platform<'repo>(
             | RENAMES_INDEX_TO_WORKTREE)
         != 0;
 
+    // Explicit FFI flags must restore a walker disabled by status.showUntrackedFiles.
+    if need_dirwalk {
+        let dirwalk = repo.dirwalk_options().map_err(|err| other(&err))?;
+        platform = platform.index_worktree_options_mut(|options| {
+            options.dirwalk_options = Some(dirwalk);
+        });
+    }
     platform = platform.index_worktree_options_mut(|options| {
         if need_dirwalk {
             if let Some(dirwalk) = options.dirwalk_options.as_mut() {
@@ -417,8 +424,27 @@ pub(crate) fn collect(
     pathspec_bytes: &[u8],
 ) -> Result<Vec<StatusRecord>, GixError> {
     validate(show, flags)?;
+    collect_with_index(
+        repo,
+        show,
+        flags,
+        pathspec_bytes,
+        crate::index::owned_index(repo)?,
+    )
+}
+
+/// Compare the caller's current index snapshot, which staging also uses for mutation and filtering.
+pub(crate) fn collect_with_index(
+    repo: &gix::Repository,
+    show: u32,
+    flags: u32,
+    pathspec_bytes: &[u8],
+    index: gix::index::File,
+) -> Result<Vec<StatusRecord>, GixError> {
+    validate(show, flags)?;
     let patterns = pathspecs(pathspec_bytes, flags & DISABLE_PATHSPEC_MATCH != 0)?;
-    let platform = configure_platform(repo, flags)?;
+    let platform = configure_platform(repo, flags)?
+        .index(gix::worktree::IndexPersistedOrInMemory::InMemory(index));
     let mut iter = platform.into_iter(patterns).map_err(|err| other(&err))?;
     let mut entries = BTreeMap::new();
 

@@ -190,6 +190,54 @@ fn assert_absent(entries: &BTreeMap<Vec<u8>, u32>, path: &[u8]) {
 }
 
 #[test]
+fn status_reads_the_current_index_when_timestamp_is_unchanged() {
+    let (root, repo) = new_repo("status-stale-cache");
+    write(&root.0, "tracked.txt", b"baseline\n");
+    commit_all(&root.0, "baseline");
+    assert!(status_map(&repo, SHOW_COMBINED, 0, b"").is_empty());
+    let index_path = root.0.join(".git/index");
+    let pinned = std::fs::metadata(&index_path)
+        .expect("stat index")
+        .modified()
+        .expect("mtime");
+
+    write(&root.0, "tracked.txt", b"staged content with a different size\n");
+    ok(repo.stage(ffi::Slice::from_slice(b"tracked.txt")));
+    std::fs::File::options()
+        .write(true)
+        .open(&index_path)
+        .expect("open index")
+        .set_times(std::fs::FileTimes::new().set_modified(pinned))
+        .expect("pin index mtime");
+    let entries = status_map(&repo, SHOW_COMBINED, 0, b"");
+    assert_eq!(
+        value(&entries, b"tracked.txt"), INDEX_MODIFIED,
+        "a completed stage has no worktree change"
+    );
+    let baseline = run_git(&root.0, &["status", "--porcelain", "--untracked-files=all"]);
+    assert!(baseline.status.success());
+    assert_eq!(baseline.stdout, b"M  tracked.txt\n");
+}
+
+#[test]
+fn explicit_untracked_flags_override_the_status_display_preference() {
+    let (root, _initial) = new_repo("hidden-untracked");
+    git(&root.0, &["config", "status.showUntrackedFiles", "no"]);
+    let repo = ok(Repo::open(ffi::Slice::from_slice(&bytes(&root.0))));
+    write(&root.0, "nested/untracked.txt", b"include me\n");
+    let entries = status_map(
+        &repo,
+        SHOW_COMBINED,
+        INCLUDE_UNTRACKED | RECURSE_UNTRACKED_DIRECTORIES,
+        b"",
+    );
+    assert_eq!(value(&entries, b"nested/untracked.txt"), WORKTREE_NEW);
+    ok(repo.stage(ffi::Slice::from_slice(b"")));
+    let index = ok(repo.index_entries()).into_vec();
+    assert!(index.into_iter().any(|entry| entry.path.into_vec() == b"nested/untracked.txt"));
+}
+
+#[test]
 fn status_combined_and_show_modes_map_index_and_worktree_changes() {
     let (root, repo) = new_repo("show-modes");
     for path in [
