@@ -100,7 +100,7 @@ pub enum Error {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Presence {
+pub(super) enum Presence {
     Missing,
     Present,
     Obstructed,
@@ -550,7 +550,7 @@ fn pattern_definition(patterns: &[BString]) -> Vec<u8> {
     out
 }
 
-fn pattern_includes(
+pub(super) fn pattern_includes(
     path: &BStr,
     search: &gix_ignore::Search,
     case: gix_glob::pattern::Case,
@@ -718,7 +718,7 @@ fn unescape_cone_path(path: &[u8]) -> BString {
     out
 }
 
-fn cone_includes(
+pub(super) fn cone_includes(
     path: &BStr,
     directories: &[BString],
     case: gix_glob::pattern::Case,
@@ -815,7 +815,7 @@ fn write_locked_bytes(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-fn entry_worktree_path(
+pub(super) fn entry_worktree_path(
     repo: &crate::Repository,
     workdir: &Path,
     path: &BStr,
@@ -849,7 +849,7 @@ fn entry_worktree_path(
     Ok(workdir.join(relative))
 }
 
-fn path_presence(
+pub(super) fn path_presence(
     repo: &crate::Repository,
     workdir: &Path,
     path: &BStr,
@@ -968,7 +968,7 @@ impl gix_status::index_as_worktree::traits::SubmoduleStatus for NoSubmodule {
     }
 }
 
-fn dirty_entries(
+pub(super) fn dirty_entries(
     repo: &crate::Repository,
     workdir: &Path,
     index: &gix_index::File,
@@ -1067,7 +1067,7 @@ fn remove_tracked_path(path: &Path) -> bool {
     }
 }
 
-fn remove_empty_parents(mut parent: Option<&Path>, workdir: &Path) {
+pub(super) fn remove_empty_parents(mut parent: Option<&Path>, workdir: &Path) {
     while let Some(directory) = parent {
         if directory == workdir || std::fs::remove_dir(directory).is_err() {
             break;
