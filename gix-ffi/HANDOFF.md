@@ -58,6 +58,20 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   successful persistence remains successful if typed reopening fails, with other
   operations retaining prior cached settings until a valid refresh. Valid identity
   writes refresh later commits on the same handle.
+- [x] Configured GetAuthor/GetCommitter and committer fallback methods match gix
+  absence/error and per-component precedence. Fallbacks and lazy identity state
+  remain on the same handle through into_sync; configuration files are unchanged.
+- [x] GixSignature owns raw name/email bytes and keeps constructor, deconstruction
+  and with/init behavior. Commit/note readers and writers preserve those bytes.
+  ResolveMailmap/TryResolveMailmap use gix's lenient load/resolve behavior, retain
+  partial mappings and timestamps, and return owned results.
+- [x] Identity/mailmap transaction `12351a13bee70d62d69cda3d`: 73/73 native tests
+  (`f86b158d719d1a2f2f7f08cbb4e971a1`) and 87/87 managed tests under
+  PatchedCoreRun/corerun.exe (`op_966b253955f7472e`); managed build
+  `op_faca91da79504d7b` passed. These are preflight totals, not a coverage percentage.
+- [ ] Strict/reusable mailmap loading, parsing, merging and entry access.
+- [ ] Full Git signature time domain beyond DateTimeOffset's representable
+  timestamps and offsets; the existing managed When contract is preserved.
 - [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
 - [x] GetShallowCommits, ShallowFilePath and raw-byte ShallowFile. Owned snapshots
   read through `gix-shallow` directly, avoiding mtime-only cache staleness; empty,

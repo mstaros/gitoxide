@@ -283,6 +283,10 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Submodule configuration, IDs, paths, state/status and repository access — `repository/submodule.rs`, `submodule/mod.rs`.
 - [ ] Blame ranges and options — `repository/blame.rs`.
 - [ ] Mailmap and configured author/committer identity — `repository/{mailmap,identity}.rs`.
+- [x] Configured identity methods: GetAuthor/GetCommitter return null only for gix absence; GetCommitterOrSetFallback (string/byte overloads) and GetCommitterOrSetGenericFallback retain session state without disk writes. Partial name/email precedence and present-empty identities follow gix.
+- [x] Owned GixSignature.NameBytes/EmailBytes and FromBytes preserve constructor/deconstruction/with/init behavior and raw commit/note identities. ResolveMailmap/TryResolveMailmap follow lenient gix loading, preserve partial mappings, raw bytes and input timestamps; Try reports whether a mapping applies. Transaction `12351a13bee70d62d69cda3d`: 73/73 native tests (`f86b158d719d1a2f2f7f08cbb4e971a1`) and 87/87 patched managed tests (`op_966b253955f7472e`), build `op_faca91da79504d7b`.
+- [ ] Strict mailmap loading and reusable snapshot/parse/merge/entry operations — gix open_mailmap_into and the public mailmap snapshot surface remain uncovered.
+- [ ] Full Git signature time domain — the compatible GixSignature.When remains DateTimeOffset; gix i64 seconds and offsets outside .NET's range or with second precision are not yet representable.
 - [ ] Remote mutation, refspecs, URL resolution and defaults — `remote/{access,build,save}.rs`, `repository/config/remote.rs`.
 - [ ] Clone preparation, fetch, ref mapping and checkout with progress/cancellation/credentials — `lib.rs`, `clone/`, `remote/connect.rs`, `remote/connection/`.
 - [ ] Full worktree administration, including remove/lock/unlock/repair/move — `repository/worktree_admin.rs`.

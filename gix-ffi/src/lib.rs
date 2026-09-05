@@ -27,6 +27,7 @@ use interoptopus::{builtins_string, builtins_vec, guard, service};
 
 mod byte_stream;
 mod configuration;
+mod identity;
 mod index;
 mod ignore;
 mod diff;
@@ -34,6 +35,7 @@ mod references;
 mod notes;
 mod status;
 pub use byte_stream::ByteReader;
+pub use identity::SignatureRecord;
 pub use index::IndexEntryRecord;
 pub use diff::{DiffRecord, TreeChangeRecord};
 pub use references::{
@@ -594,6 +596,83 @@ impl Repo {
             }
             Err(error) => ffi::Err(error),
         }
+    }
+
+    /// Configured author, absent only when gix cannot resolve a complete identity.
+    pub fn get_author(&mut self) -> ffi::Result<SignatureRecord, GixError> {
+        let repo = self.inner.to_thread_local();
+        let result = identity::configured(repo.author());
+        // Preserve lazy persona/time state as well as in-memory configuration.
+        self.inner = repo.into_sync();
+        match result {
+            Ok(signature) => ffi::Ok(signature),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Configured committer, absent only when gix cannot resolve a complete identity.
+    pub fn get_committer(&mut self) -> ffi::Result<SignatureRecord, GixError> {
+        let repo = self.inner.to_thread_local();
+        let result = identity::configured(repo.committer());
+        self.inner = repo.into_sync();
+        match result {
+            Ok(signature) => ffi::Ok(signature),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Resolve the committer or install raw fallback bytes only in this repository session.
+    pub fn get_committer_or_set_fallback(
+        &mut self,
+        name: ffi::Slice<u8>,
+        email: ffi::Slice<u8>,
+    ) -> ffi::Result<SignatureRecord, GixError> {
+        let mut repo = self.inner.to_thread_local();
+        let result = repo.committer_or_set_fallback(name.as_slice(), email.as_slice())
+            .map_err(|error| GixError::Config(chain_to_string(&error)))
+            .and_then(identity::from_ref);
+        self.inner = repo.into_sync();
+        match result {
+            Ok(signature) => ffi::Ok(signature),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Resolve the committer or retain gix's generic fallback in this repository session.
+    pub fn get_committer_or_set_generic_fallback(&mut self) -> ffi::Result<SignatureRecord, GixError> {
+        let mut repo = self.inner.to_thread_local();
+        let result = repo.committer_or_set_generic_fallback()
+            .map_err(|error| GixError::Config(chain_to_string(&error)))
+            .and_then(identity::from_ref);
+        self.inner = repo.into_sync();
+        match result {
+            Ok(signature) => ffi::Ok(signature),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Resolve through gix's lenient repository mailmap, retaining an unmapped identity.
+    pub fn resolve_mailmap(
+        &self,
+        name: ffi::Slice<u8>,
+        email: ffi::Slice<u8>,
+        time_seconds: i64,
+        time_offset_seconds: i32,
+    ) -> SignatureRecord {
+        identity::resolve(&self.inner.to_thread_local(), name.as_slice(), email.as_slice(),
+            time_seconds, time_offset_seconds, false)
+    }
+
+    /// Resolve through gix's lenient repository mailmap, reporting absence when no mapping applies.
+    pub fn try_resolve_mailmap(
+        &self,
+        name: ffi::Slice<u8>,
+        email: ffi::Slice<u8>,
+        time_seconds: i64,
+        time_offset_seconds: i32,
+    ) -> SignatureRecord {
+        identity::resolve(&self.inner.to_thread_local(), name.as_slice(), email.as_slice(),
+            time_seconds, time_offset_seconds, true)
     }
 
     /// Whether this repository has no working tree.

@@ -9,10 +9,10 @@ public sealed record GitNote(GixObjectId Id, string Message, GixSignature Author
     private readonly GixSignature _author = Author;
     private readonly GixSignature _committer = Committer;
     private readonly string _messageBytes = Encode(Message);
-    private readonly string _authorNameBytes = Encode(Author.Name);
-    private readonly string _authorEmailBytes = Encode(Author.Email);
-    private readonly string _committerNameBytes = Encode(Committer.Name);
-    private readonly string _committerEmailBytes = Encode(Committer.Email);
+    private readonly string _authorNameBytes = Convert.ToBase64String(Author.NameBytes);
+    private readonly string _authorEmailBytes = Convert.ToBase64String(Author.EmailBytes);
+    private readonly string _committerNameBytes = Convert.ToBase64String(Committer.NameBytes);
+    private readonly string _committerEmailBytes = Convert.ToBase64String(Committer.EmailBytes);
 
     public string Message
     {
@@ -26,8 +26,8 @@ public sealed record GitNote(GixObjectId Id, string Message, GixSignature Author
         init
         {
             _author = value;
-            _authorNameBytes = Encode(value.Name);
-            _authorEmailBytes = Encode(value.Email);
+            _authorNameBytes = Convert.ToBase64String(value.NameBytes);
+            _authorEmailBytes = Convert.ToBase64String(value.EmailBytes);
         }
     }
 
@@ -37,8 +37,8 @@ public sealed record GitNote(GixObjectId Id, string Message, GixSignature Author
         init
         {
             _committer = value;
-            _committerNameBytes = Encode(value.Name);
-            _committerEmailBytes = Encode(value.Email);
+            _committerNameBytes = Convert.ToBase64String(value.NameBytes);
+            _committerEmailBytes = Convert.ToBase64String(value.EmailBytes);
         }
     }
 
