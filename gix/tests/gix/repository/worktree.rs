@@ -127,17 +127,26 @@ mod removal_safety {
 
     #[test]
     fn a_mismatched_registration_cannot_authorize_removal() -> crate::Result {
-        let (_temp, repo, added) = fixture(true)?;
-        std::fs::write(
-            added.checkout.join(".git"),
-            format!("gitdir: {}\n", repo.git_dir().display()),
-        )?;
-        let error = repo
-            .remove_worktree(added.id.as_ref(), remove::Options::default())
-            .expect_err("foreign checkout evidence must not authorize removal");
-        assert!(matches!(error.into_inner(), remove::Error::Status { .. }));
-        assert_eq!(std::fs::read(added.checkout.join("tracked"))?, b"committed\n");
-        assert!(added.admin_dir.is_dir());
+        for force in [false, true] {
+            let (_temp, repo, added) = fixture(true)?;
+            std::fs::write(
+                added.checkout.join(".git"),
+                format!("gitdir: {}\n", repo.git_dir().display()),
+            )?;
+            let mut arguments = vec!["worktree", "remove"];
+            if force {
+                arguments.push("--force");
+            }
+            arguments.push(added.checkout.to_str().expect("UTF-8 temporary path"));
+            let baseline = git(repo.workdir().expect("main worktree"), &arguments)?;
+            assert!(!baseline.status.success(), "Git validates ownership even with force");
+            let error = repo
+                .remove_worktree(added.id.as_ref(), remove::Options { force })
+                .expect_err("foreign checkout evidence must not authorize removal");
+            assert!(matches!(error.into_inner(), remove::Error::Status { .. }));
+            assert_eq!(std::fs::read(added.checkout.join("tracked"))?, b"committed\n");
+            assert!(added.admin_dir.is_dir());
+        }
         Ok(())
     }
 

@@ -652,6 +652,7 @@ impl crate::Repository {
     /// nonignored untracked changes. Status errors are propagated instead of treated as clean.
     /// A registration without an index is removable only when its checkout contains just `.git`.
     /// Untracked files are checked even when `status.showUntrackedFiles` hides them.
+    /// Even with `force`, an existing checkout must link back to this registration.
     pub fn remove_worktree(
         &self,
         id: &crate::bstr::BStr,
@@ -673,6 +674,25 @@ impl crate::Repository {
             });
         };
 
+        let status_error = |source: Box<dyn std::error::Error + Send + Sync>| {
+            Error::Status {
+                id: entry.id.clone(),
+                source,
+            }
+            .raise()
+        };
+        if let Some(checkout) = entry.checkout.as_deref().filter(|path| path.is_dir()) {
+            let back_pointer = gix_discover::path::from_gitdir_file(&checkout.join(".git"))
+                .map_err(|err| status_error(Box::new(err)))?;
+            let actual = std::fs::canonicalize(back_pointer).map_err(|err| status_error(Box::new(err)))?;
+            let expected = std::fs::canonicalize(&entry.admin_dir).map_err(|err| status_error(Box::new(err)))?;
+            if actual != expected {
+                return Err(status_error(Box::new(std::io::Error::other(
+                    "the checkout does not link back to its worktree registration",
+                ))));
+            }
+        }
+
         if !options.force {
             if let Some(reason) = &entry.lock_reason {
                 return Err(Error::Locked {
@@ -682,18 +702,6 @@ impl crate::Repository {
                 .raise());
             }
             if let Some(checkout) = entry.checkout.as_deref().filter(|path| path.is_dir()) {
-                let status_error = |source: Box<dyn std::error::Error + Send + Sync>| {
-                    Error::Status {
-                        id: entry.id.clone(),
-                        source,
-                    }
-                    .raise()
-                };
-                if !entry.condition.is_registered() {
-                    return Err(status_error(Box::new(std::io::Error::other(
-                        "the checkout does not link back to its worktree registration",
-                    ))));
-                }
                 let has_index = entry
                     .admin_dir
                     .join("index")
