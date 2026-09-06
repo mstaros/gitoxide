@@ -30,7 +30,7 @@ impl Default for Limits {
     }
 }
 
-/// Output forms for NUL-delimited, full-OID, full-tree listings.
+/// Output forms for full-OID, repository-root-relative tree listings.
 #[derive(Clone, Debug, Default)]
 pub enum Format {
     /// Mode, object kind, OID, tab and path.
@@ -42,12 +42,18 @@ pub enum Format {
     NameOnly,
     /// Only object IDs.
     ObjectOnly,
-    /// Reserved custom formats, rejected before output.
+    /// NUL-delimited output using Git's documented ls-tree format fields:
+    /// objectmode, objecttype, objectname, objectsize[:padded], and path.
+    /// Literal bytes, %% and %xNN escapes are supported. Generic path fields use
+    /// core.quotePath=true; exact built-in formats retain raw -z paths, like Git.
+    /// Invalid formats fail
+    /// before any output, even for an empty tree.
     Custom(BString),
-    /// Reserved newline/quoted output, rejected before output.
+    /// Default fields with newline termination and Git C-style path quoting,
+    /// equivalent to core.quotePath=true, independently of repository config.
     Quoted,
 }
-/// Supported ls-tree options. Paths are always raw, root-relative and NUL terminated.
+/// Supported ls-tree options. Paths are root-relative; Format selects quoting and termination.
 #[derive(Clone, Debug, Default)]
 pub struct TreeOptions {
     /// Recurse into trees (-r).
@@ -77,7 +83,7 @@ pub struct Entry {
 pub enum Error {
     #[error("Invalid export limits")]
     InvalidLimits,
-    #[error("Unsupported export output format")]
+    #[error("Unsupported or invalid export output format")]
     Unsupported,
     #[error("Export interrupted")]
     Interrupted,
@@ -109,7 +115,7 @@ fn check_interrupt(cancel: &AtomicBool) -> Result<(), Exn<Error>> {
 /// An isolated reader with mandatory allocation limits and replacements disabled.
 ///
 /// list_tree/write_tree cover raw full-tree ls-tree -z output and its recursion,
-/// tree-only, long, name-only and object-only forms. read_object returns verified
+/// tree-only, long, name-only, object-only, custom and quoted forms. read_object returns verified
 /// kind/size/content (cat-file -t/-s/raw equivalents). write_blob writes raw
 /// cat-file blob bytes. No command parser, pathspec, abbreviation, textconv,
 /// filter, mailmap or batch protocol is implied.
@@ -164,7 +170,9 @@ impl Platform {
     pub fn list_tree(
         &self, tree_id: ObjectId, options: &TreeOptions, cancel: &AtomicBool,
     ) -> Result<Vec<Entry>, Exn<Error>> {
-        if matches!(options.format, Format::Custom(_) | Format::Quoted) { return Err(Error::Unsupported.raise()); }
+        if let Format::Custom(format) = &options.format {
+            write_custom(format, None, &mut std::io::sink(), cancel)?;
+        }
         let mut pending = vec![(tree_id, BString::default(), EntryMode::from(gix_object::tree::EntryKind::Tree), 0usize)];
         let mut records = Vec::new();
         let mut count = 0usize;
@@ -232,26 +240,45 @@ impl Platform {
         &self, tree_id: ObjectId, options: &TreeOptions, out: &mut dyn Write, cancel: &AtomicBool,
     ) -> Result<(), Exn<Error>> {
         let records = self.list_tree(tree_id, options, cancel)?;
+        // Git dispatches these exact custom strings to its built-in formatters.
+        // Their -z paths are raw; generic custom %(path) fields are quoted.
+        let format = match &options.format {
+            Format::Custom(format) => match format.as_slice() {
+                b"%(objectmode) %(objecttype) %(objectname)%x09%(path)" => &Format::Default,
+                b"%(objectmode) %(objecttype) %(objectname) %(objectsize:padded)%x09%(path)" => &Format::Long,
+                b"%(path)" => &Format::NameOnly,
+                b"%(objectname)" => &Format::ObjectOnly,
+                _ => &options.format,
+            },
+            format => format,
+        };
         for entry in records {
             check_interrupt(cancel)?;
-            let kind = if entry.mode.is_tree() { "tree" } else if entry.mode.is_commit() { "commit" } else { "blob" };
-            let prefix = match options.format {
-                Format::Default => format!("{:06o} {kind} {}\t", entry.mode.value(), entry.id),
-                Format::Long => {
-                    let size = entry.size.map_or_else(|| "-".to_owned(), |n| n.to_string());
-                    format!("{:06o} {kind} {} {size:>7}\t", entry.mode.value(), entry.id)
+            if let Format::Custom(format) = format {
+                write_custom(format, Some(&entry), out, cancel)?;
+            } else {
+                let kind = entry_kind(&entry);
+                let prefix = match format {
+                    Format::Default | Format::Quoted => format!("{:06o} {kind} {}\t", entry.mode.value(), entry.id),
+                    Format::Long => {
+                        let size = entry.size.map_or_else(|| "-".to_owned(), |n| n.to_string());
+                        format!("{:06o} {kind} {} {size:>7}\t", entry.mode.value(), entry.id)
+                    }
+                    Format::NameOnly => String::new(),
+                    Format::ObjectOnly => entry.id.to_string(),
+                    Format::Custom(_) => unreachable!("custom formats are handled above"),
+                };
+                write_listing_bytes(prefix.as_bytes(), out, cancel)?;
+                if matches!(format, Format::Quoted) {
+                    write_listing_bytes(gix_quote::ansi_c::quote(entry.path.as_bstr()).as_ref(), out, cancel)?;
+                } else if !matches!(format, Format::ObjectOnly) {
+                    write_listing_bytes(&entry.path, out, cancel)?;
                 }
-                Format::NameOnly => String::new(),
-                Format::ObjectOnly => entry.id.to_string(),
-                Format::Custom(_) | Format::Quoted => return Err(Error::Unsupported.raise()),
-            };
-            out.write_all(prefix.as_bytes()).map_err(|err| source("write listing", err))?;
-            if !matches!(options.format, Format::ObjectOnly) {
-                out.write_all(&entry.path).map_err(|err| source("write path", err))?;
             }
-            out.write_all(b"\0").map_err(|err| source("terminate record", err))?;
+            let terminator = if matches!(format, Format::Quoted) { b"\n" } else { b"\0" };
+            write_listing_bytes(terminator, out, cancel)?;
         }
-        Ok(())
+        check_interrupt(cancel)
     }
 
     /// Write verified raw blob bytes in 64 KiB chunks. No filters are run.
@@ -294,4 +321,81 @@ impl Platform {
         file.persist_noclobber(destination).map_err(|err| source("publish blob without replacement", err.error))?;
         Ok(size)
     }
+}
+fn entry_kind(entry: &Entry) -> &'static str {
+    if entry.mode.is_tree() { "tree" } else if entry.mode.is_commit() { "commit" } else { "blob" }
+}
+
+fn write_listing_bytes(bytes: &[u8], out: &mut dyn Write, cancel: &AtomicBool) -> Result<(), Exn<Error>> {
+    for chunk in bytes.chunks(64 * 1024) {
+        check_interrupt(cancel)?;
+        out.write_all(chunk).map_err(|err| source("write listing", err))?;
+    }
+    check_interrupt(cancel)
+}
+
+// None validates the entire format without emitting data. Parse directly from
+// the caller's bytes to avoid allocating a token list or an expanded record.
+fn write_custom(
+    mut format: &[u8], entry: Option<&Entry>, out: &mut dyn Write, cancel: &AtomicBool,
+) -> Result<(), Exn<Error>> {
+    check_interrupt(cancel)?;
+    while !format.is_empty() {
+        check_interrupt(cancel)?;
+        let literal_len = format.find_byte(b'%').unwrap_or(format.len());
+        if entry.is_some() {
+            write_listing_bytes(&format[..literal_len], out, cancel)?;
+        }
+        format = &format[literal_len..];
+        if format.is_empty() { break; }
+        format = &format[1..];
+        match format.first() {
+            Some(b'%') => {
+                if entry.is_some() { write_listing_bytes(b"%", out, cancel)?; }
+                format = &format[1..];
+            }
+            Some(b'x') => {
+                let hex = format.get(1..3).ok_or_else(|| Error::Unsupported.raise())?;
+                let digit = |byte: u8| match byte {
+                    b'0'..=b'9' => Some(byte - b'0'),
+                    b'a'..=b'f' => Some(byte - b'a' + 10),
+                    b'A'..=b'F' => Some(byte - b'A' + 10),
+                    _ => None,
+                };
+                let byte = digit(hex[0]).zip(digit(hex[1]))
+                    .map(|(high, low)| high * 16 + low)
+                    .ok_or_else(|| Error::Unsupported.raise())?;
+                if entry.is_some() { write_listing_bytes(&[byte], out, cancel)?; }
+                format = &format[3..];
+            }
+            Some(b'(') => {
+                let end = format.find_byte(b')').ok_or_else(|| Error::Unsupported.raise())?;
+                let field = &format[1..end];
+                if !matches!(field, b"objectmode" | b"objecttype" | b"objectname" |
+                    b"objectsize" | b"objectsize:padded" | b"path") {
+                    return Err(Error::Unsupported.raise());
+                }
+                if let Some(entry) = entry {
+                    if field == b"path" {
+                        write_listing_bytes(gix_quote::ansi_c::quote(entry.path.as_bstr()).as_ref(), out, cancel)?;
+                    } else {
+                        let value = match field {
+                            b"objectmode" => format!("{:06o}", entry.mode.value()),
+                            b"objecttype" => entry_kind(entry).to_owned(),
+                            b"objectname" => entry.id.to_string(),
+                            b"objectsize" | b"objectsize:padded" => {
+                                let size = entry.size.map_or_else(|| "-".to_owned(), |n| n.to_string());
+                                if field == b"objectsize:padded" { format!("{size:>7}") } else { size }
+                            }
+                            _ => unreachable!("field was validated above"),
+                        };
+                        write_listing_bytes(value.as_bytes(), out, cancel)?;
+                    }
+                }
+                format = &format[end + 1..];
+            }
+            _ => return Err(Error::Unsupported.raise()),
+        }
+    }
+    check_interrupt(cancel)
 }

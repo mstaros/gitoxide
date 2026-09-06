@@ -13,6 +13,11 @@ captured working directory and retains the caller's repository trust level.
 - [x] `Platform::write_tree` preserves byte paths, full OIDs and depth-first order;
       tested against git ls-tree -z --full-tree with -r, -t, -d (including gitlinks),
       -l, --name-only and --object-only.
+- [x] Existing `Format::Custom` supports all documented fields, padded sizes,
+      literal percent and hexadecimal byte escapes with Git's exact-format dispatch.
+      `Format::Quoted` emits default fields with C-style paths and newline records.
+- [x] Malformed custom formats fail before output, including empty trees.
+      Long literal output checks cancellation between 64 KiB chunks.
 - [x] `Platform::read_object` checks hash kind, header size/kind, decoded size/kind
       and recomputed content OID. Verified kind/size/raw data match git cat-file.
 - [x] `Platform::write_blob` verifies before output and writes in 64 KiB chunks.
@@ -21,16 +26,28 @@ captured working directory and retains the caller's repository trust level.
       publication. Existing files/directories/links are never replaced.
 - [x] Tests cover SHA-1/SHA-256, raw binary paths/data, empty blobs/trees, modes,
       packed delta objects, corruption, missing/wrong objects, limits,
-      unsupported formats, cancellation and output failure and process-directory changes.
+      invalid formats, cancellation, output failure and process-directory changes.
 
 ## Deliberate boundary
-This API is not a Git command-line parser. Paths are always root-relative and
-NUL-delimited, IDs are full length. Pathspecs, abbreviations, custom formats,
-quoted newline output, textconv, filters, mailmap and batch parsing are not
-implemented. Custom/quoted formats have explicit unsupported variants and are
-rejected before output. Native listing retains symlink/gitlink metadata and does
-not follow them. Blob headers are inspected during listing; content verification
-happens on object reads or blob export.
+Paths are repository-root-relative and IDs are full length. Built-in formats use
+raw paths and NUL records. `Format::Quoted` uses the default columns with newline
+records and fixed `core.quotePath=true` behavior, independent of repository config.
+
+`Format::Custom` implements `objectmode`, `objecttype`, `objectname`,
+`objectsize`, `objectsize:padded` and `path` fields, plus `%%` and `%xNN`.
+Each record ends in NUL; a format can also embed NUL via `%x00`. Generic
+`%(path)` fields use C-style quoting even with NUL termination, matching Git.
+The four exact formats corresponding to default, long, name-only and object-only
+use their built-in behavior, including raw paths. Quoting always follows
+`core.quotePath=true`. Format literals and expanded fields are written in
+bounded chunks; expanded records and a token list are not buffered.
+
+This remains a typed native API. Command-line parsing, tree-ish/pathspec
+selection, cwd-relative names, abbreviations, arbitrary combinations of quoting
+and columns, `core.quotePath=false`, textconv, filters, mailmap and cat-file batch
+parsing are not implemented. Native listing retains symlink/gitlink metadata
+without following them. Blob headers are inspected during listing; content
+verification happens on object reads or blob export.
 
 The companion RmcpLib exporter owns the versioned manifest/lock schema and
 directory publication. Its TODO and contract live in Docs/BlobExport.md.

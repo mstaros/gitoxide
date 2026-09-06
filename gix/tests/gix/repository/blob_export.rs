@@ -32,6 +32,11 @@ fn fixture(kind: gix::hash::Kind) -> crate::Result<(gix_testtools::tempfile::Tem
     let empty_id = repo.write_blob([])?.detach();
     let link_id = repo.write_blob(b"../outside")?.detach();
     let mut children = vec![entry(b"binary\t\n\xff", Blob, blob_id), entry(b"empty", Blob, empty_id)];
+    // Store names directly in Git trees so Windows filename restrictions cannot
+    // hide quoting bugs. Together these cover every legal byte in a component.
+    let all_bytes: Vec<u8> = (1..=255).filter(|byte| *byte != b'/').collect();
+    children.push(entry(&all_bytes, Blob, blob_id));
+    children.push(entry(b"space and '%(path)%x00", Blob, blob_id));
     // Similar blobs give Git a real delta candidate during repack.
     for i in 0..12 {
         let mut bytes = vec![b'x'; 70_000];
@@ -68,8 +73,21 @@ fn raw_tree_and_cat_file_parity_for_both_hashes_loose_and_packed() -> crate::Res
             }
             let reader = repo.blob_export(Limits::default()).map_err(|e| e.into_error())?;
             for (recursive, show_trees, trees_only) in [(false,false,false),(true,false,false),(true,true,false),(true,false,true),(false,false,true)] {
-                for (format, flag) in [(Format::Default,None),(Format::Long,Some("-l")),(Format::NameOnly,Some("--name-only")),(Format::ObjectOnly,Some("--object-only"))] {
-                    let mut args = vec!["ls-tree", "-z", "--full-tree"];
+                for (format, flag) in [
+                    (Format::Default,None),(Format::Long,Some("-l")),
+                    (Format::NameOnly,Some("--name-only")),(Format::ObjectOnly,Some("--object-only")),
+                    (Format::Quoted,None),
+                    (Format::Custom("%(objectmode) %(objecttype) %(objectname)%x09%(path)".into()),Some("--format=%(objectmode) %(objecttype) %(objectname)%x09%(path)")),
+                    (Format::Custom("%(objectsize)|%(objectsize:padded)|%(path)|%%|%x00%x09%x0a%xFF".into()),Some("--format=%(objectsize)|%(objectsize:padded)|%(path)|%%|%x00%x09%x0a%xFF")),
+                    (Format::Custom("%(objectmode) %(objecttype) %(objectname) %(objectsize:padded)%x09%(path)".into()),Some("--format=%(objectmode) %(objecttype) %(objectname) %(objectsize:padded)%x09%(path)")),
+                    (Format::Custom("prefix:%(objectmode) %(objecttype) %(objectname)%x09%(path)".into()),Some("--format=prefix:%(objectmode) %(objecttype) %(objectname)%x09%(path)")),
+                    (Format::Custom("%(objectname)".into()),Some("--format=%(objectname)")),
+                    (Format::Custom("%(path)".into()),Some("--format=%(path)")),
+                    (Format::Custom("literal%%end".into()),Some("--format=literal%%end")),
+                    (Format::Custom("".into()),Some("--format=")),
+                ] {
+                    let mut args = vec!["-c", "core.quotePath=true", "ls-tree", "--full-tree"];
+                    if !matches!(format, Format::Quoted) { args.push("-z"); }
                     if recursive { args.push("-r"); }
                     if show_trees { args.push("-t"); }
                     if trees_only { args.push("-d"); }
@@ -80,7 +98,7 @@ fn raw_tree_and_cat_file_parity_for_both_hashes_loose_and_packed() -> crate::Res
                     let mut actual = Vec::new();
                     reader.write_tree(tree_id, &TreeOptions {recursive,show_trees,trees_only,format}, &mut actual, &AtomicBool::new(false))
                         .map_err(|e| e.into_error())?;
-                    assert_eq!(actual, expected, "{args:?}, packed={packed}");
+                    assert_eq!(actual.as_bstr(), expected.as_bstr(), "{args:?}, packed={packed}");
                 }
             }
             let cancel = AtomicBool::new(false);
@@ -130,9 +148,6 @@ fn export_rejects_bad_identity_kind_size_limits_and_replacements() -> crate::Res
     assert!(reader.write_blob(blob_id, Some(1), &mut output, &cancel).is_err());
     assert!(reader.read_object(repo.object_hash().null(), &cancel).is_err());
     assert!(reader.read_object(gix::hash::Kind::Sha256.empty_blob(), &cancel).is_err());
-    for format in [Format::Quoted, Format::Custom("%(path)".into())] {
-        assert!(reader.write_tree(tree_id, &TreeOptions { format, ..Default::default() }, &mut output, &cancel).is_err());
-    }
     assert!(output.is_empty());
     for limits in [
         Limits { object_bytes: 1, ..Default::default() },
@@ -159,7 +174,7 @@ fn export_rejects_bad_identity_kind_size_limits_and_replacements() -> crate::Res
 
 #[test]
 fn output_failure_cancellation_and_no_clobber_leave_no_partial_destination() -> crate::Result {
-    let (root, repo, _tree_id, blob_id) = fixture(gix::hash::Kind::Sha256)?;
+    let (root, repo, tree_id, blob_id) = fixture(gix::hash::Kind::Sha256)?;
     let reader = repo.blob_export(Limits::default()).map_err(|e| e.into_error())?;
     let cancel = AtomicBool::new(false);
     let destination = root.path().join("export");
@@ -183,6 +198,10 @@ fn output_failure_cancellation_and_no_clobber_leave_no_partial_destination() -> 
     }
     cancel.store(false, Ordering::Relaxed);
     assert!(reader.write_blob(blob_id, None, &mut Fail, &cancel).is_err());
+    for format in [Format::Quoted, Format::Custom("%(path)!".into())] {
+        let options = TreeOptions { format, ..Default::default() };
+        assert!(reader.write_tree(tree_id, &options, &mut Fail, &cancel).is_err());
+    }
     Ok(())
 }
 
@@ -206,5 +225,48 @@ fn depth_limit_and_mid_write_cancellation_are_enforced() -> crate::Result {
     let mut out = CancelWriter { cancel: &cancel, written: 0 };
     assert!(reader.write_blob(blob_id, None, &mut out, &cancel).is_err());
     assert_eq!(out.written, 64 * 1024);
+    Ok(())
+}
+
+#[test]
+fn custom_formats_validate_completely_even_for_empty_trees() -> crate::Result {
+    let (_root, repo, tree_id, _blob_id) = fixture(gix::hash::Kind::Sha256)?;
+    let empty_tree_id = tree(&repo, Vec::new())?;
+    let reader = repo.blob_export(Limits::default()).map_err(|e| e.into_error())?;
+    let cancel = AtomicBool::new(false);
+    for input in [
+        "%", "prefix%", "%x", "%x0", "%xGG", "%X00", "%q",
+        "%(", "%(path", "%()", "%(unknown)", "%(path:quoted)",
+        "%(objectsize:bad)", "%(objectname:short)", "%(path)valid%x0",
+    ] {
+        for tree_id in [tree_id, empty_tree_id] {
+            let options = TreeOptions { format: Format::Custom(input.into()), ..Default::default() };
+            let mut output = Vec::new();
+            assert!(reader.write_tree(tree_id, &options, &mut output, &cancel).is_err(), "{input:?}");
+            assert!(output.is_empty(), "invalid formats fail before output: {input:?}");
+            assert!(reader.list_tree(tree_id, &options, &cancel).is_err(), "enumeration also validates options");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn custom_output_checks_cancellation_between_literal_chunks() -> crate::Result {
+    let (_root, repo, tree_id, _blob_id) = fixture(gix::hash::Kind::Sha1)?;
+    let reader = repo.blob_export(Limits::default()).map_err(|e| e.into_error())?;
+    let cancel = AtomicBool::new(false);
+    struct CancelWriter<'a> { cancel: &'a AtomicBool, written: usize }
+    impl Write for CancelWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.written += bytes.len();
+            self.cancel.store(true, Ordering::Relaxed);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let options = TreeOptions { format: Format::Custom(vec![b'x'; 200_000].into()), ..Default::default() };
+    let mut output = CancelWriter { cancel: &cancel, written: 0 };
+    assert!(reader.write_tree(tree_id, &options, &mut output, &cancel).is_err());
+    assert_eq!(output.written, 64 * 1024, "custom literals use bounded cancellable writes");
     Ok(())
 }
