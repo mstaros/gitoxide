@@ -535,7 +535,7 @@ fn worktrees_can_be_locked_and_unlocked() -> crate::Result {
     // what Git wrote rather than only what we write ourselves.
     assert_eq!(
         lock_reason(&repo, "wt-c-locked").as_deref(),
-        Some("added with --lock"),
+        Some("added with --lock\n"),
         "a reason written by git is read back verbatim"
     );
 
@@ -553,7 +553,7 @@ fn worktrees_can_be_locked_and_unlocked() -> crate::Result {
     repo.lock_worktree("wt-a".into(), Some("held for a test".into()))?;
     assert_eq!(
         lock_reason(&repo, "wt-a").as_deref(),
-        Some("held for a test"),
+        Some("held for a test\n"),
         "our own reason round-trips through the same reader"
     );
     assert!(
@@ -716,47 +716,286 @@ fn added_worktrees_are_accepted_by_git() -> crate::Result {
         "a branch checked out elsewhere cannot be taken"
     );
 
-    // Options we accept for shape but do not implement must say so rather than be ignored.
-    let unsupported = repo.add_worktree(
-        &fixture.path().join("unsupported"),
+    // Orphan mode creates an unborn branch and an empty, Git-readable worktree.
+    let orphan = repo.add_worktree(
+        &fixture.path().join("orphaned"),
         add::Attachment::DetachedAt(repo.head_id()?.detach()),
         add::Options {
+            orphan: true,
             checkout: true,
             ..Default::default()
         },
+    )?;
+    assert_eq!(
+        std::fs::read_to_string(orphan.admin_dir.join("HEAD"))?.trim_end(),
+        "ref: refs/heads/orphaned"
     );
     assert!(
-        unsupported.is_err(),
-        "requesting materialisation from the registration step is refused explicitly"
+        repo.try_find_reference("refs/heads/orphaned")?.is_none(),
+        "an unborn branch has no reference until its first commit"
     );
+    removal_safety::git_ok(&orphan.checkout, &["status", "--porcelain"])?;
     assert!(
-        !fixture.path().join("unsupported").exists(),
-        "and nothing was created before the refusal"
+        !orphan.checkout.join("tracked").exists(),
+        "orphan checkout starts from an empty index"
     );
     Ok(())
 }
 
+mod add_options {
+    use std::path::Path;
+
+    use gix::repository::worktree_admin::add;
+
+    use super::removal_safety::{fixture, git_ok};
+
+    #[test]
+    fn force_reuses_stale_registrations_and_checked_out_branches_but_not_nonempty_paths(
+    ) -> crate::Result {
+        let (temp, repo, stale) = fixture(false)?;
+        repo.lock_worktree(stale.id.as_ref(), Some("stale lock".into()))?;
+        std::fs::remove_dir_all(&stale.checkout)?;
+
+        let replaced = repo.add_worktree(
+            &stale.checkout,
+            add::Attachment::DetachedAt(repo.head_id()?.detach()),
+            add::Options {
+                force: true,
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(replaced.id, stale.id, "the stale administrative name is reused");
+        git_ok(&replaced.checkout, &["rev-parse", "--git-dir"])?;
+
+        let shared = repo.reference(
+            "refs/heads/shared",
+            repo.head_id()?.detach(),
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "test setup",
+        )?;
+        let first = repo.add_worktree(
+            &temp.path().join("shared-one"),
+            add::Attachment::Branch(shared.name().to_owned()),
+            add::Options::default(),
+        )?;
+        let second = repo.add_worktree(
+            &temp.path().join("shared-two"),
+            add::Attachment::Branch(shared.name().to_owned()),
+            add::Options {
+                force: true,
+                ..Default::default()
+            },
+        )?;
+        git_ok(&first.checkout, &["rev-parse", "--git-dir"])?;
+        git_ok(&second.checkout, &["rev-parse", "--git-dir"])?;
+
+        let occupied = temp.path().join("occupied");
+        std::fs::create_dir(&occupied)?;
+        std::fs::write(occupied.join("keep"), b"mine\n")?;
+        let error = repo
+            .add_worktree(
+                &occupied,
+                add::Attachment::DetachedAt(repo.head_id()?.detach()),
+                add::Options {
+                    force: true,
+                    ..Default::default()
+                },
+            )
+            .expect_err("force never takes over a nonempty directory");
+        assert!(matches!(
+            error.into_inner(),
+            add::Error::DirectoryNotEmpty { path } if path == occupied
+        ));
+        assert_eq!(std::fs::read(occupied.join("keep"))?, b"mine\n");
+        Ok(())
+    }
+
+    #[test]
+    fn branch_reset_is_guarded_and_no_track_preserves_existing_configuration() -> crate::Result {
+        let (temp, repo, _existing) = fixture(false)?;
+        let root = repo.workdir().expect("main worktree");
+        let old_tip = repo.head_id()?.detach();
+        git_ok(root, &["commit", "--allow-empty", "-q", "-m", "new tip"])?;
+        let repo = gix::open_opts(root, crate::restricted())?;
+        let new_tip = repo.head_id()?.detach();
+        repo.reference(
+            "refs/heads/reset-me",
+            old_tip,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "test setup",
+        )?;
+        git_ok(root, &["config", "branch.reset-me.remote", "keep"])?;
+        git_ok(root, &["config", "branch.reset-me.merge", "refs/heads/keep"])?;
+
+        let reset = repo.add_worktree(
+            &temp.path().join("reset"),
+            add::Attachment::DetachedAt(new_tip),
+            add::Options {
+                new_branch_force: Some("reset-me".into()),
+                track: Some(false),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            repo.find_reference("refs/heads/reset-me")?
+                .peel_to_id()?
+                .detach(),
+            new_tip
+        );
+        assert_eq!(
+            std::fs::read_to_string(reset.admin_dir.join("HEAD"))?.trim_end(),
+            "ref: refs/heads/reset-me"
+        );
+        let config = gix_config::File::from_path_no_includes(
+            repo.common_dir().join("config"),
+            gix_config::Source::Local,
+        )?;
+        assert_eq!(
+            config.string_by("branch", Some("reset-me".into()), "remote"),
+            Some("keep".into()),
+            "no-track does not delete existing tracking configuration"
+        );
+
+        let error = repo
+            .add_worktree(
+                &temp.path().join("reset-again"),
+                add::Attachment::DetachedAt(old_tip),
+                add::Options {
+                    force: true,
+                    new_branch_force: Some("reset-me".into()),
+                    ..Default::default()
+                },
+            )
+            .expect_err("a reset branch in use is protected even with force");
+        assert!(matches!(error.into_inner(), add::Error::BranchInUse { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn relative_paths_are_bidirectional_and_git_readable() -> crate::Result {
+        let (temp, repo, _existing) = fixture(false)?;
+        let outcome = repo.add_worktree(
+            &temp.path().join("relative"),
+            add::Attachment::DetachedAt(repo.head_id()?.detach()),
+            add::Options {
+                relative_paths: true,
+                ..Default::default()
+            },
+        )?;
+
+        let gitdir = std::fs::read_to_string(outcome.admin_dir.join("gitdir"))?;
+        assert!(Path::new(gitdir.trim()).is_relative());
+        let back = std::fs::read_to_string(outcome.checkout.join(".git"))?;
+        let back = back
+            .trim()
+            .strip_prefix("gitdir: ")
+            .expect("a gitdir file");
+        assert!(Path::new(back).is_relative());
+        git_ok(&outcome.checkout, &["rev-parse", "--absolute-git-dir"])?;
+        Ok(())
+    }
+
+    #[test]
+    fn tracking_and_remote_guessing_write_git_compatible_branch_configuration() -> crate::Result {
+        let temp = gix_testtools::tempfile::TempDir::new()?;
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root)?;
+        git_ok(&root, &["init", "-q"])?;
+        git_ok(&root, &["config", "user.name", "Worktree Tests"])?;
+        git_ok(&root, &["config", "user.email", "worktree@example.com"])?;
+        std::fs::write(root.join("tracked"), b"committed\n")?;
+        git_ok(&root, &["add", "tracked"])?;
+        git_ok(&root, &["commit", "-q", "-m", "fixture"])?;
+        git_ok(&root, &["config", "remote.up.url", "."])?;
+        git_ok(
+            &root,
+            &[
+                "config",
+                "remote.up.fetch",
+                "+refs/heads/*:refs/remotes/up/*",
+            ],
+        )?;
+        git_ok(&root, &["update-ref", "refs/remotes/up/topic", "HEAD"])?;
+
+        let repo = gix::open_opts(&root, crate::restricted())?;
+        let remote: gix::refs::FullName = "refs/remotes/up/topic".try_into()?;
+        let tracked = repo.add_worktree(
+            &temp.path().join("tracked-branch"),
+            add::Attachment::Branch(remote),
+            add::Options {
+                new_branch: Some("tracked-branch".into()),
+                track: Some(true),
+                ..Default::default()
+            },
+        )?;
+        git_ok(&tracked.checkout, &["rev-parse", "--git-dir"])?;
+
+        let missing_local: gix::refs::FullName = "refs/heads/topic".try_into()?;
+        let guessed = repo.add_worktree(
+            &temp.path().join("guessed"),
+            add::Attachment::Branch(missing_local),
+            add::Options {
+                guess_remote: true,
+                ..Default::default()
+            },
+        )?;
+        git_ok(&guessed.checkout, &["rev-parse", "--git-dir"])?;
+
+        let config = gix_config::File::from_path_no_includes(
+            repo.common_dir().join("config"),
+            gix_config::Source::Local,
+        )?;
+        for branch in ["tracked-branch", "topic"] {
+            assert_eq!(
+                config.string_by("branch", Some(branch.into()), "remote"),
+                Some("up".into())
+            );
+            assert_eq!(
+                config.string_by("branch", Some(branch.into()), "merge"),
+                Some("refs/heads/topic".into())
+            );
+        }
+
+        let invalid = repo.add_worktree(
+            &temp.path().join("invalid-track"),
+            add::Attachment::DetachedAt(repo.head_id()?.detach()),
+            add::Options {
+                track: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(invalid.is_err());
+        assert!(!temp.path().join("invalid-track").exists());
+        Ok(())
+    }
+}
+
 /// `prune` must find exactly what is broken and leave everything else alone, and `remove` must be
-/// safe to retry. The fixture ships one already-broken entry and one locked one, which is the
-/// distinction that matters: a lock outranks brokenness.
+/// safe to retry. Both checkout pointers stay inside this test's fixture, and a lock outranks
+/// brokenness.
 #[test]
 fn broken_worktrees_are_pruned_and_removal_is_idempotent() -> crate::Result {
     use gix::repository::worktree_admin::{add, prune, remove};
 
-    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
-    let repo = gix::open_opts(fixture.path().join("repo"), crate::restricted())?;
+    let (fixture, repo, broken) = removal_safety::fixture(false)?;
+    std::fs::remove_dir_all(&broken.checkout)?;
+    let healthy = repo.add_worktree(
+        &fixture.path().join("healthy"),
+        add::Attachment::DetachedAt(repo.head_id()?.detach()),
+        add::Options::default(),
+    )?;
 
-    // Lock the entry the fixture already broke, so it is both prunable and protected.
-    repo.lock_worktree("wt-deleted".into(), Some("keep me".into()))?;
+    // This vanished checkout is owned by the test, and its registration is protected by a lock.
+    repo.lock_worktree(broken.id.as_ref(), Some("keep me".into()))?;
     let dry = repo.prune_worktrees(prune::Options {
         dry_run: true,
         ..Default::default()
     })?;
     assert!(
-        dry.iter().all(|candidate| candidate.id != "wt-deleted"),
+        dry.iter().all(|candidate| candidate.id != broken.id),
         "a locked entry is never a candidate, however broken: {dry:?}"
     );
-    repo.unlock_worktree("wt-deleted".into())?;
+    repo.unlock_worktree(broken.id.as_ref())?;
 
     let dry = repo.prune_worktrees(prune::Options {
         dry_run: true,
@@ -764,7 +1003,7 @@ fn broken_worktrees_are_pruned_and_removal_is_idempotent() -> crate::Result {
     })?;
     assert_eq!(
         dry.iter().map(|c| c.id.to_string()).collect::<Vec<_>>(),
-        vec!["wt-deleted".to_string()],
+        vec![broken.id.to_string()],
         "unlocked, it is the only broken entry the fixture has"
     );
     assert!(
@@ -772,7 +1011,7 @@ fn broken_worktrees_are_pruned_and_removal_is_idempotent() -> crate::Result {
         "a dry run reports without removing"
     );
     assert!(
-        repo.common_dir().join("worktrees").join("wt-deleted").is_dir(),
+        broken.admin_dir.is_dir(),
         "and really did not remove it"
     );
 
@@ -782,6 +1021,7 @@ fn broken_worktrees_are_pruned_and_removal_is_idempotent() -> crate::Result {
         repo.prune_worktrees(prune::Options {
             dry_run: true,
             expire: Some(ancient),
+            ..Default::default()
         })?
         .is_empty(),
         "an expiry older than every entry excludes them all"
@@ -791,9 +1031,11 @@ fn broken_worktrees_are_pruned_and_removal_is_idempotent() -> crate::Result {
     assert_eq!(pruned.len(), 1, "one entry was actually removed");
     assert!(pruned[0].removed);
     assert!(
-        !repo.common_dir().join("worktrees").join("wt-deleted").is_dir(),
+        !broken.admin_dir.is_dir(),
         "and it is gone from disk"
     );
+
+    assert!(healthy.admin_dir.is_dir() && healthy.checkout.is_dir(), "healthy links survive pruning");
 
     // Removal of a healthy worktree we registered ourselves, then a retry.
     let target = fixture.path().join("to-be-removed");
@@ -852,8 +1094,13 @@ fn broken_worktrees_are_pruned_and_removal_is_idempotent() -> crate::Result {
 fn worktrees_can_be_moved_and_repaired() -> crate::Result {
     use gix::repository::worktree_admin::{add, r#move, repair};
 
-    let fixture = gix_testtools::scripted_fixture_writable("make_worktree_repo.sh")?;
-    let repo = gix::open_opts(fixture.path().join("repo"), crate::restricted())?;
+    let shared_fixture = gix_testtools::scripted_fixture_read_only("make_worktree_repo.sh")?;
+    let shared_gitdir = shared_fixture.join("repo/.git/worktrees/wt-a/gitdir");
+    let shared_backpointer = shared_fixture.join("wt-a/.git");
+    let shared_pointers = (std::fs::read(&shared_gitdir)?, std::fs::read(&shared_backpointer)?);
+
+    // Every checkout pointer must be owned: repair rewrites backpointers from those paths.
+    let (fixture, repo, _) = removal_safety::fixture(false)?;
     let action = |repaired: &[repair::Repaired], id: &str| -> Option<repair::Action> {
         repaired
             .iter()
@@ -947,6 +1194,16 @@ fn worktrees_can_be_moved_and_repaired() -> crate::Result {
     assert!(
         String::from_utf8_lossy(&listed.stdout).contains("relocated-by-hand"),
         "and git follows it to the hand-moved location"
+    );
+    assert_eq!(
+        std::fs::read(&shared_gitdir)?,
+        shared_pointers.0,
+        "move and repair must not rewrite the shared source registration"
+    );
+    assert_eq!(
+        std::fs::read(&shared_backpointer)?,
+        shared_pointers.1,
+        "move and repair must not rewrite the shared source checkout backpointer"
     );
     Ok(())
 }

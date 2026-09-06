@@ -33,6 +33,7 @@ mod ignore;
 mod diff;
 mod references;
 mod notes;
+mod worktrees;
 mod remote;
 mod status;
 mod tags;
@@ -45,6 +46,7 @@ pub use references::{
 pub use status::StatusRecord;
 pub use remote::RemoteRecord;
 pub use notes::{NoteRecord, NoteEntryRecord};
+pub use worktrees::WorktreeRecord;
 pub use tags::{TagRecord, TagSignatureRecord};
 
 /// The single error type crossing the boundary.
@@ -1584,6 +1586,61 @@ impl Repo {
         }
     }
 
+    /// Materialize linked registrations, including stale entries, ordered by raw name.
+    pub fn get_worktrees(&self) -> ffi::Result<ffi::Vec<WorktreeRecord>, GixError> {
+        let repo = self.inner.to_thread_local();
+        match worktrees::list(&repo) {
+            Ok(entries) => ffi::Ok(entries.into()),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Add an explicitly named linked worktree; an empty reference creates a new branch at HEAD.
+    pub fn add_worktree(
+        &self, name: ffi::Slice<u8>, path: ffi::Slice<u8>, reference: ffi::Slice<u8>,
+        lock_worktree: bool, checkout_worktree: bool,
+    ) -> ffi::Result<WorktreeRecord, GixError> {
+        let repo = self.inner.to_thread_local();
+        match worktrees::add(&repo, name.as_slice(), path.as_slice(), reference.as_slice(),
+            lock_worktree, checkout_worktree) {
+            Ok(entry) => ffi::Ok(entry),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Add an explicitly named detached linked worktree at an exact commit.
+    pub fn add_detached_worktree(
+        &self, name: ffi::Slice<u8>, path: ffi::Slice<u8>, commit_id: ffi::String, lock_worktree: bool,
+    ) -> ffi::Result<WorktreeRecord, GixError> {
+        let repo = self.inner.to_thread_local();
+        match worktrees::add_detached(&repo, name.as_slice(), path.as_slice(), &commit_id, lock_worktree) {
+            Ok(entry) => ffi::Ok(entry),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Prune eligible linked registrations; deleting working files requires an explicit flag.
+    pub fn prune_worktrees(
+        &self, include_valid: bool, include_locked: bool, remove_working_trees: bool,
+    ) -> ffi::Result<u64, GixError> {
+        let repo = self.inner.to_thread_local();
+        match worktrees::prune(&repo, None, include_valid, include_locked, remove_working_trees) {
+            Ok(count) => ffi::Ok(count),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
+    /// Prune one exact linked registration; absence or ineligibility returns false.
+    pub fn prune_worktree(
+        &self, name: ffi::Slice<u8>, include_valid: bool, include_locked: bool, remove_working_tree: bool,
+    ) -> ffi::Result<bool, GixError> {
+        let repo = self.inner.to_thread_local();
+        match worktrees::prune(&repo, Some(name.as_slice()), include_valid, include_locked, remove_working_tree) {
+            Ok(count) => ffi::Ok(count != 0),
+            Err(error) => ffi::Err(error),
+        }
+    }
+
 }
 
 /// The exported surface.
@@ -1611,6 +1668,7 @@ pub fn ffi_inventory() -> RustInventory {
         .register(builtins_vec!(StatusRecord))
         .register(builtins_vec!(TreeChangeRecord))
         .register(builtins_vec!(NoteEntryRecord))
+        .register(builtins_vec!(WorktreeRecord))
         .register(builtins_vec!(ffi::Vec<u8>))
         .register(builtins_vec!(RemoteRecord))
         .register(service!(ReferenceLockLease))

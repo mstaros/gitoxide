@@ -1,6 +1,6 @@
 # gix-ffi / GixSharp — Handoff
 
-Status updated on 2026-09-05. The earlier foundation was verified at
+Status updated on 2026-09-06. The earlier foundation was verified at
 `b3f28217b0b4310aa6e26782467875bbbfc31c84`; the completed wrapper expansion is
 integrated as `22c1da14`, followed by ignore/local-exclude at `c051d784`.
 The shallow boundary/location slice is recorded in transaction
@@ -12,6 +12,8 @@ Identity/mailmap transaction `12351a13bee70d62d69cda3d` includes tags and the
 SHA-256 object-ID update through target `2627094`.
 Remotes and 0.18.0 fork consumption are recorded in transaction
 `6e1237640581f12b73f9a67e`, based on identity commit `649e35ae`.
+Worktree compatibility is recorded in recovered transaction
+`b41fe3d2725b370bcb674b23`, based on current main `07e62164`.
 The completion goal is full public gix coverage, confirmed by the user.
 Use the checkboxes here for boundary work and the implementation checklist in
 `../Issues.md` for method/domain coverage. Historical prototype counts and examples
@@ -90,6 +92,11 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   Stored bytes are the default; explicit resolution uses gix URL rewrites.
   Missing/reset URLs, includes, linked worktrees, unchanged timestamps, malformed
   config, raw-byte ordering and ownership after disposal are covered.
+- [x] Worktree compatibility slice: owned GitWorktreeInfo, GetWorktrees, both
+  AddWorktree forms, AddDetachedWorktree and exact/bulk PruneWorktree(s).
+  Attached/detached, no-checkout, branch guards, raw lock bytes and stale entries
+  are tested. Metadata-only pruning preserves checkout files; checkout removal
+  refuses dirty, untracked and foreign data even when locks are included.
 - [x] Additional gix methods: HasObject, WriteBlob and IsShallow.
 - [x] GetShallowCommits, ShallowFilePath and raw-byte ShallowFile. Owned snapshots
   read through `gix-shallow` directly, avoiding mtime-only cache staleness; empty,
@@ -116,6 +123,12 @@ No cbindgen, no ClangSharp, no hand-written P/Invoke.
   after path normalization; the prior failed gate and replacement evidence are
   recorded in `../Issues.md`. Focused path-sensitive tests and remote 50/50 passed
   in the fresh worktree; the full inferred commit gate remains required.
+- [x] Recovered worktree validation on current main `07e62164`: 36/36 focused
+  core worktree tests passed; the separate `gix-ffi` workspace passed 97/97
+  native tests including binding generation; and 106/106 managed tests passed
+  under PatchedCoreRun/corerun.exe in `op_0c75fcb42e1c4a95`. The recovered
+  implementation retains the earlier FFI/managed surface and now implements the
+  core add options instead of rejecting valid Git behavior.
 - [ ] Complete every remaining public gix capability in the `../Issues.md`
   implementation checklist, including additions made in parallel.
 - [ ] Complete the remaining boundary, profile and delivery checks below.

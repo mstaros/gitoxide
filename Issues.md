@@ -255,7 +255,7 @@ Independent new methods continue in parallel with generator and boundary-contrac
 
 - [ ] Merge/snapshot/safe-checkout compatibility slice — issue `2c6f1a08`.
 - [x] Remote metadata compatibility slice — issue `2c6f1a09`; owned raw-byte names and fetch/push URL lists, GetRemotes() and explicit URL-resolution overload.
-- [ ] Worktree compatibility slice — issue `2c6f1a0a`.
+- [x] Worktree compatibility slice — issue `2c6f1a0a`; recovered and completed in transaction `b41fe3d2725b370bcb674b23`. The current validation passes 36/36 core worktree tests, 97/97 native FFI tests including binding generation, and 106/106 patched-runtime managed tests.
 - [x] Configuration compatibility slice — issue `2c6f1a0b`; GetConfigString, TryGetConfigString, SetConfigString and DeleteConfigValue.
 - [ ] Sparse-checkout compatibility slice — issue `2c6f1a0d`.
 
@@ -289,7 +289,8 @@ These groups come from the current public source under `gix/src`. Split a group 
 - [ ] Full Git signature time domain — the compatible GixSignature.When remains DateTimeOffset; gix i64 seconds and offsets outside .NET's range or with second precision are not yet representable.
 - [ ] Remote mutation, refspecs, URL builders/explicit rewrite controls and defaults — `remote/{access,build,save}.rs`, `repository/config/remote.rs`. Configured remote URL resolution is covered by GetRemotes(true).
 - [ ] Clone preparation, fetch, ref mapping and checkout with progress/cancellation/credentials — `lib.rs`, `clone/`, `remote/connect.rs`, `remote/connection/`.
-- [ ] Full worktree administration, including remove/lock/unlock/repair/move — `repository/worktree_admin.rs`.
+- [x] Owned linked-worktree enumeration and selected creation/pruning options — `Repository::{worktree_admin_entries,add_worktree,prune_worktrees}` → `GetWorktrees`, both `AddWorktree` forms, `AddDetachedWorktree`, `PruneWorktrees` and `PruneWorktree`; exact names, branches, checkout selection, locks and safe pruning are covered.
+- [ ] Remaining worktree administration options and remove/lock/unlock/repair/move — `repository/worktree_admin.rs`.
 - [x] Fresh raw configuration loading — `config::Snapshot::reload` backs GetConfigString/TryGetConfigString and local edit preflight. Existing permissions, includes/includeIf, private git-dir/current branch, API/CLI precedence, cwd anchoring and malformed typed-value repair are covered; transaction `d461153e562eea7ec0b754bb`.
 - [ ] Typed configuration snapshots, source/trust information and overrides — `config/snapshot/`.
 - [ ] Remaining notes platform controls: selected/display references and glob order, multi-reference lookup, shorthand mutation names and custom commit messages — `note::Platform::{refs,with_refs,get,replace,remove,with_commit_message}`. The single-ref compatibility materializer is complete; a general note cursor remains under P0c.
@@ -623,7 +624,7 @@ Repository core and discovery; configuration.
 id: 2c6f1a0a
 kind: issue
 severity: medium
-status: open
+status: closed
 ```
 
 ### Scope
@@ -637,6 +638,16 @@ Main and linked worktrees, branch-attached and detached creation, locked/prunabl
 ### Dependencies
 
 Repository core and discovery; references and branches; guarded checkout behavior.
+
+### Resolution
+
+- [x] `GitWorktreeInfo` and all scoped methods are implemented in recovered transaction `6d729a1b4deac6566263d6be`; the original transaction `1b82d1d92b47587a342e16c7` is preserved after MCP lifecycle recovery.
+- [x] Records own name/path/lock-file bytes. Main and linked callers share common-directory enumeration; malformed or foreign backpointers are invalid, and unreadable locks fail closed.
+- [x] Creation reserves exact administrative names and branches, supports attached/detached and no-checkout forms, and retains registration plus partial files when checkout fails. Existing symbolic-chain guards remain held until registration completes.
+- [x] Pruning separates metadata removal from checkout deletion. Locked/valid entries require explicit selection; deleting a checkout still refuses dirty, untracked or foreign data when locks are included.
+- [x] Regenerated bindings; 67/67 native tests and 81/81 managed tests passed via PatchedCoreRun/corerun.exe. All 27 focused core worktree tests pass (`62bf954e06b02638a54a3ca28173f6ff`) with self-contained pruning and move/repair registrations; move/repair also asserts that both shared source fixture pointers remain unchanged. A reduced `status` + `sha1` compile passes after checkout feature gating. Without `worktree-mutation`, checkout requests use the existing `Unsupported` error before any registration is reserved or written.
+
+The compatibility slice is complete. Remaining worktree options and remove/lock/unlock/repair/move stay unchecked above.
 
 ## Configuration parity
 
@@ -789,6 +800,8 @@ The failure is silent, delayed, and attributed to the wrong change. Nothing fail
 ### Workaround in use
 
 Mutate only the administrative directory (`<repo>/.git/worktrees/<id>/...`), which really is inside the copy. Never mutate a path obtained by resolving `gitdir`. To simulate a vanished checkout, rewrite the `gitdir` file to name a path that does not exist rather than deleting the path it currently names.
+
+- [x] Pruning and move/repair regression tests use the existing self-contained registration helper. The move/repair test snapshots and verifies both source fixture pointer files; all 27 focused worktree tests pass in recovered transaction `6d729a1b4deac6566263d6be` (`62bf954e06b02638a54a3ca28173f6ff`). The verified damaged generated variant was regenerated without changing source fixtures or other caches. The general copied-fixture helper remains open below.
 
 ### Possible fixes
 

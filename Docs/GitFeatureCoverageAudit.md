@@ -14,6 +14,12 @@ verified blob-export and worktree handoffs. A plumbing algorithm is not counted
 as a complete Git feature when state persistence, conflict recovery, hooks, or
 the surrounding ref/index/worktree orchestration is absent.
 
+Rejection is not coverage. An explicit unsupported/invalid-option branch is
+listed here as a gap to remove, even when it is useful temporarily to prevent
+silent data loss while a bounded implementation is incomplete. Strict
+validation counts as support only when Git rejects the same input or when it
+protects a documented library invariant without excluding valid Git behavior.
+
 ## Summary
 
 Gitoxide has broad and useful plumbing for repositories, objects, references,
@@ -32,7 +38,7 @@ workflows and remote write/server behavior.
 | P1 | Repository formats | SHA-1 and substantial SHA-256 object support | No reftable backend or complete Git 3.0 ref/protocol compatibility |
 | P1 | Large-repository integration | Commit-graph, index extensions and bitmap readers exist in parts | Compressed sparse indexes are rejected by guarded transitions; split-index, fsmonitor, untracked-cache and bitmap maintenance/write paths are incomplete |
 | P1 | Integrity/maintenance | Object parsing, connectivity traversal and strict verification in the fork's blob-export path | General strict object creation/hash verification and full `git fsck` parity are incomplete; pack writes lack full delta compression and bitmap generation |
-| P2 | Worktree porcelain | Add, remove, move, repair, prune, lock and unlock exist | `worktree add` rejects `--force`, `-b`/`-B`, checkout, orphan, tracking, remote guessing and relative paths |
+| P2 | Worktree porcelain | Add, remove, move, repair, prune, lock and unlock exist; add supports force, branch create/reset, checkout, orphan, tracking, remote guessing and relative pointers | The current boolean library surface cannot spell CLI repetition or explicit `--track=inherit`/`--no-relative-paths`; list/output formatting remains caller-side |
 | P2 | Submodules | Read `.gitmodules`, apply overrides, determine activity and report status | No complete add/update/sync/deinit-style CRUD workflow |
 | P2 | Verified blob CLI parity | Strict tree/blob verification, raw export, custom/quoted tree listings and atomic no-replace publication | No broad tree-ish/pathspec/cwd/abbreviation selection, `cat-file --batch`, transformations, configurable `core.quotePath=false`, or constant-memory packed-delta streaming |
 
@@ -67,9 +73,32 @@ worktree and index.
 ### `Repository::add_worktree()`
 
 Administrative creation and cleanup are guarded, including the fixed Windows
-contention race. The existing option type nevertheless rejects `--force`,
-`-b`, `-B`, `--checkout`, `--orphan`, `--track`/`--no-track`,
-`--guess-remote`, and `--relative-paths`.
+contention race. Valid add modes are implemented rather than rejected:
+
+- force permits reuse of stale registrations and deliberate sharing of an
+  existing branch, but never takes over a non-empty directory;
+- `-b` reserves and creates a branch only after registration succeeds;
+- `-B` uses an expected-value reference transaction and still refuses to
+  reset a branch held by any worktree, even with force;
+- checkout materialises the index/worktree when the crate has the
+  `worktree-mutation` capability; without that compile-time feature the
+  operation reports a capability error before mutation;
+- orphan mode creates an unborn branch and an empty index/worktree;
+- direct tracking, no-track, `branch.autoSetupMerge` modes, configured
+  remote refspec mapping, `worktree.guessRemote`, and
+  `checkout.defaultRemote` are honored;
+- relative mode writes both directional pointers relatively and is also
+  selected by `worktree.useRelativePaths`; repair and move preserve relative
+  registrations.
+
+The library's existing `Option<bool>` tracking field represents direct,
+disabled, or configured automatic behavior. Explicit CLI
+`--track=inherit` is available through `branch.autoSetupMerge=inherit`, but
+does not yet have a distinct per-call value. Likewise, a false
+`relative_paths` value consults configuration and cannot explicitly override
+a configured true value. These are option-model gaps, not runtime feature
+rejections. CLI repetition and progress/output formatting belong at the caller
+boundary.
 
 ### Protocol and transport
 
@@ -90,7 +119,8 @@ self-contained native SSH transport/server path.
    claiming full Git-compatible mutating workflows.
 5. Add push, followed by promisor/partial-clone and bundle bootstrapping.
 6. Complete reftable and write-side large-repository accelerators.
-7. Fill worktree, submodule and blob-command option parity as demand requires.
+7. Fill the remaining worktree option-model, submodule and blob-command
+   parity gaps without treating explicit rejection as completion.
 
 ## Implementation status
 
@@ -113,4 +143,13 @@ Validation on 2026-09-06 includes:
 
 This closes only one-tree index replacement. Full checkout/reset orchestration,
 one-tree worktree and sparse-checkout behavior, three-tree read-tree, and
-cross-ref/index/worktree crash recovery remain open.
+cross-ref/index/worktree crash recovery remain open. The rejection tests above
+are safety rails for that incomplete slice, not delivered Git-feature coverage.
+
+The linked-worktree add slice is now implemented on the existing
+`Repository::add_worktree()` method. Validation includes 36 focused core
+worktree tests, Git-readable attached/detached/orphan registrations, force and
+stale-registration handling, guarded branch reset, tracking and remote guessing,
+bidirectional relative pointers, checkout materialisation, and the five
+registration-race/cleanup tests. Native FFI and managed validation are recorded
+in the transaction handoff once the final gates complete.

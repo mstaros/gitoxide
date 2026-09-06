@@ -44,7 +44,7 @@ pub enum Condition {
     MissingGitdir,
     /// The `gitdir` file names a checkout directory which no longer exists.
     CheckoutMissing,
-    /// The checkout directory exists, but its `.git` file does not, so the link is one-way.
+    /// The checkout directory exists, but its `.git` file is missing, malformed, or points elsewhere.
     CheckoutNotLinked,
 }
 
@@ -122,10 +122,17 @@ impl crate::Repository {
                 Ok(checkout) => {
                     let condition = if !checkout.is_dir() {
                         Condition::CheckoutMissing
-                    } else if !checkout.join(".git").exists() {
-                        Condition::CheckoutNotLinked
                     } else {
-                        Condition::Registered
+                        let linked = gix_discover::path::from_gitdir_file(&checkout.join(".git"))
+                            .ok()
+                            .and_then(|path| std::fs::canonicalize(path).ok())
+                            .zip(std::fs::canonicalize(&admin_dir).ok())
+                            .is_some_and(|(actual, expected)| actual == expected);
+                        if linked && admin_dir.join("HEAD").is_file() {
+                            Condition::Registered
+                        } else {
+                            Condition::CheckoutNotLinked
+                        }
                     };
                     (condition, Some(checkout))
                 }
@@ -136,7 +143,12 @@ impl crate::Repository {
                 gitdir_modified: std::fs::metadata(admin_dir.join("gitdir"))
                     .and_then(|meta| meta.modified())
                     .ok(),
-                lock_reason: proxy.lock_reason(),
+                // Failure to read a present lock is never evidence that pruning is safe.
+                lock_reason: match std::fs::read(admin_dir.join("locked")) {
+                    Ok(bytes) => Some(bytes.into()),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(err) => return Err(Error::Listing(err).raise()),
+                },
                 admin_dir,
                 condition,
                 checkout,
@@ -181,22 +193,31 @@ pub mod add {
     /// What the new worktree's `HEAD` should point at.
     #[derive(Debug, Clone)]
     pub enum Attachment {
-        /// Attach `HEAD` to an existing local branch, which must not be in use by another worktree.
+        /// Attach `HEAD` to a branch, or use it as the start point for `-b`/`-B`.
+        ///
+        /// Without branch creation this must name an existing local branch.
         Branch(gix_ref::FullName),
         /// Leave `HEAD` detached at a commit, as `git worktree add --detach` does.
         DetachedAt(gix_hash::ObjectId),
     }
 
-    /// The full option surface of `git worktree add`.
-    ///
-    /// Options which this phase does not yet implement are present but rejected with
-    /// [`Error::Unsupported`] rather than silently ignored, so a caller can never believe it asked
-    /// for something it did not get.
+    /// The library-level option surface of `git worktree add`.
     #[derive(Debug, Default, Clone)]
     pub struct Options {
-        /// `--force`: permit a non-empty target directory, and a branch already checked out.
+        /// An exact administrative identifier, independent of the checkout's basename.
+        ///
+        /// It must be a safe single path component. Collisions are errors;
+        /// `None` retains Git's basename-derived identifier with numeric suffixes.
+        pub name: Option<BString>,
+        /// `--force`: permit reuse of a stale registration and a branch already checked out.
+        ///
+        /// Like Git, this never permits taking over a non-empty directory. A single library flag
+        /// authorizes stale locked registrations as well; repeated CLI spelling is caller policy.
         pub force: bool,
-        /// `-b <name>`: create a new branch for the worktree.
+        /// `-b <name>`: create a new local branch at the attachment's commit.
+        ///
+        /// The short branch name is reserved until registration succeeds, then published
+        /// with a must-not-exist reference transaction.
         pub new_branch: Option<BString>,
         /// `-B <name>`: create or reset a branch for the worktree.
         pub new_branch_force: Option<BString>,
@@ -204,16 +225,23 @@ pub mod add {
         pub lock: Option<Option<BString>>,
         /// `--checkout`: materialise the working tree.
         ///
-        /// Registration and materialisation are separate calls here, mirroring `git worktree add
-        /// --no-checkout` followed by `git checkout`, so requesting it from this method is refused.
+        /// Checkout uses exclusive file creation after registration. A checkout error retains the
+        /// registration and any partial files, and identifies both in the returned error.
+        /// Requires the `worktree-mutation` feature; otherwise the request is refused before registration.
         pub checkout: bool,
         /// `--orphan`: start from an unborn branch.
         pub orphan: bool,
-        /// `--track` / `--no-track`.
+        /// `--track` / `--no-track`; `None` follows `branch.autoSetupMerge`.
+        ///
+        /// Configured `inherit` mode copies the start branch's upstream settings.
         pub track: Option<bool>,
-        /// `--guess-remote`.
+        /// `--guess-remote`; false still honors `worktree.guessRemote`.
+        ///
+        /// Ambiguity is resolved through `checkout.defaultRemote` when configured.
         pub guess_remote: bool,
-        /// `--relative-paths`: record `gitdir` and `commondir` relative rather than absolute.
+        /// `--relative-paths`: record both directional `gitdir` pointers relative to their files.
+        ///
+        /// When false, `worktree.useRelativePaths` is consulted.
         pub relative_paths: bool,
         /// `--quiet`: suppress progress reporting, which this method does not emit anyway.
         pub quiet: bool,
@@ -226,7 +254,7 @@ pub mod add {
         pub id: BString,
         /// The administrative directory under `worktrees/`.
         pub admin_dir: PathBuf,
-        /// The checkout directory, which exists but has not been populated.
+        /// The checkout directory, populated when requested with `Options::checkout`.
         pub checkout: PathBuf,
     }
 
@@ -234,8 +262,31 @@ pub mod add {
     #[derive(Debug, thiserror::Error)]
     #[expect(missing_docs)]
     pub enum Error {
-        #[error("`{option}` is accepted for compatibility with `git worktree add` but is not implemented yet")]
+        #[error("`{option}` requires a crate feature which is not enabled")]
         Unsupported { option: &'static str },
+        #[error("Invalid administrative identifier")]
+        InvalidName(#[source] gix_validate::path::component::Error),
+        #[error("The administrative identifier {id:?} already exists")]
+        IdentifierExists { id: BString },
+        #[error("Could not resolve or reserve the worktree branch")]
+        Reference {
+            #[source]
+            source: Box<dyn std::error::Error + Send + Sync + 'static>,
+        },
+        #[error("Worktree {id:?} remains registered at {path:?}, but checkout was incomplete")]
+        Checkout {
+            id: BString,
+            path: PathBuf,
+            #[source]
+            source: Box<dyn std::error::Error + Send + Sync + 'static>,
+        },
+        #[error("Worktree {id:?} remains registered at {path:?}, but branch tracking configuration failed")]
+        Configure {
+            id: BString,
+            path: PathBuf,
+            #[source]
+            source: Box<dyn std::error::Error + Send + Sync + 'static>,
+        },
         #[error("{path:?} is already registered as the worktree {id:?}")]
         AlreadyRegistered { path: PathBuf, id: BString },
         #[error("{path:?} exists and is not empty; refusing to take it over")]
@@ -328,6 +379,16 @@ pub mod prune {
         /// `gc.worktreePruneExpire`; that default belongs to the caller, since this is the
         /// mechanism rather than the policy.
         pub expire: Option<std::time::SystemTime>,
+        /// Limit pruning to this exact administrative identifier; `None` considers all entries.
+        pub name: Option<BString>,
+        /// Permit pruning registrations whose checkout is valid.
+        pub include_valid: bool,
+        /// Permit pruning locked registrations, without authorizing dirty-file deletion.
+        pub include_locked: bool,
+        /// Remove the checkout after validating its backpointer and checking for changes.
+        ///
+        /// Otherwise pruning removes metadata only and preserves checkout bytes.
+        pub remove_working_tree: bool,
     }
 
     /// A single entry considered by [`prune_worktrees()`](crate::Repository::prune_worktrees()).
@@ -347,6 +408,10 @@ pub mod prune {
     #[derive(Debug, thiserror::Error)]
     #[expect(missing_docs)]
     pub enum Error {
+        #[error("Invalid administrative identifier")]
+        InvalidName(#[source] gix_validate::path::component::Error),
+        #[error("Could not safely remove the selected checkout")]
+        Remove(#[source] super::remove::Error),
         #[error("Could not read the registered worktrees")]
         Listing(#[source] super::Error),
         #[error("Could not remove {path:?}")]
@@ -519,24 +584,23 @@ impl crate::Repository {
         Ok(())
     }
 
-    /// Register a new linked worktree at `path` attached per `attach`, **without** materialising
+    /// Register a new linked worktree at `path` attached per `attach`, optionally materialising
     /// its working tree, and return what was created.
     ///
     /// This is the first of the three steps `git worktree add` performs, and corresponds to
     /// `git worktree add --no-checkout`: it writes the administrative directory under
     /// `worktrees/`, the `.git` file in the checkout, and the pointers linking them. Configuring
-    /// sparse checkout and materialising the tree are separate calls, so that a caller can
-    /// configure a cone before any file is written — and so an interrupted sequence leaves a
-    /// registered but empty worktree that can be finished rather than a half-populated one.
+    /// sparse checkout can precede materialisation by leaving `options.checkout` disabled.
+    /// When checkout is requested, failure leaves the registered checkout available for recovery.
     ///
     /// The target must be absent or an empty directory. A path already registered as a worktree of
     /// this repository is reported as such rather than being taken over, and a branch already in
     /// use by another worktree — including one held by an in-progress rebase or bisect — is
     /// refused, matching Git.
     ///
-    /// The checkout's `.git` file is reserved exclusively before its administrative directory,
-    /// so calls which lose the checkout claim never create or remove administrative directories.
-    /// Identifier collisions are retried with a numeric suffix, including incomplete registrations.
+    /// Administrative directories and the checkout's `.git` file are reserved exclusively.
+    /// Derived identifier collisions are retried with a numeric suffix, including incomplete
+    /// registrations. Explicit identifiers fail on collisions instead.
     /// On failure, cleanup removes only paths reserved by this call. A newly created checkout is
     /// removed only if it is still empty, preserving files concurrently placed there by others.
     pub fn add_worktree(
@@ -547,19 +611,12 @@ impl crate::Repository {
     ) -> Result<add::Outcome, Exn<add::Error>> {
         use add::{Attachment, Error};
 
-        for (requested, option) in [
-            (options.force, "--force"),
-            (options.new_branch.is_some(), "-b"),
-            (options.new_branch_force.is_some(), "-B"),
-            (options.checkout, "--checkout"),
-            (options.orphan, "--orphan"),
-            (options.track.is_some(), "--track/--no-track"),
-            (options.guess_remote, "--guess-remote"),
-            (options.relative_paths, "--relative-paths"),
-        ] {
-            if requested {
-                return Err(Error::Unsupported { option }.raise());
+        #[cfg(not(feature = "worktree-mutation"))]
+        if options.checkout {
+            return Err(Error::Unsupported {
+                option: "--checkout (worktree-mutation)",
             }
+            .raise());
         }
 
         let checkout = if path.is_absolute() {
@@ -567,22 +624,49 @@ impl crate::Repository {
         } else {
             self.workdir().unwrap_or(self.common_dir()).join(path)
         };
+        let reference_error = |source: Box<dyn std::error::Error + Send + Sync>| {
+            Error::Reference { source }.raise()
+        };
 
-        // Classify the target: registered here, foreign, or usable.
-        let entries = self.worktree_admin_entries().map_err(|err| {
+        // Classify the target before resolving references. A failed checkout claim must not create
+        // or disturb administrative state, even when the requested commit is invalid.
+        let mut entries = self.worktree_admin_entries().map_err(|err| {
             Error::Reservation(err.into_inner()).raise()
         })?;
-        if let Some(entry) = entries
+        let replaced_registration = entries
             .iter()
-            .find(|entry| entry.checkout.as_deref() == Some(checkout.as_path()))
-        {
-            return Err(Error::AlreadyRegistered {
-                path: checkout,
-                id: entry.id.clone(),
+            .position(|entry| entry.checkout.as_deref() == Some(checkout.as_path()))
+            .map(|position| entries.remove(position));
+        if let Some(entry) = &replaced_registration {
+            if !options.force || entry.condition.is_registered() {
+                return Err(Error::AlreadyRegistered {
+                    path: checkout,
+                    id: entry.id.clone(),
+                }
+                .raise());
             }
-            .raise());
         }
-        let checkout_existed = checkout.is_dir();
+        let checkout_existed = match std::fs::metadata(&checkout) {
+            Ok(metadata) if metadata.is_dir() => true,
+            Ok(_) => {
+                return Err(Error::Io {
+                    path: checkout,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "the worktree path exists and is not a directory",
+                    ),
+                }
+                .raise());
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(source) => {
+                return Err(Error::Io {
+                    path: checkout,
+                    source,
+                }
+                .raise());
+            }
+        };
         if checkout_existed
             && std::fs::read_dir(&checkout)
                 .map_err(|source| {
@@ -598,17 +682,196 @@ impl crate::Repository {
             return Err(Error::DirectoryNotEmpty { path: checkout }.raise());
         }
 
-        // Refuse a branch another worktree is using, exactly as `git worktree add` does.
+        let requested_new_branch = match (&options.new_branch, &options.new_branch_force) {
+            (Some(_), Some(_)) => {
+                return Err(reference_error(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "new_branch and new_branch_force are mutually exclusive",
+                ))));
+            }
+            (Some(name), None) => Some((name.clone(), false)),
+            (None, Some(name)) => Some((name.clone(), true)),
+            (None, None) => None,
+        };
+        let guess_remote = options.guess_remote
+            || self
+                .config_snapshot()
+                .boolean("worktree.guessRemote")
+                .unwrap_or(false);
+
+        let mut held_names;
+        let mut tracking_source = None;
+        let mut creating_branch = false;
+        let mut resetting_branch = false;
+        let mut orphan_branch = false;
+        let (attach, tip) = if options.orphan {
+            let short_name = match requested_new_branch.as_ref() {
+                Some((name, _)) => name.clone(),
+                None => checkout
+                    .file_name()
+                    .map(|name| gix_path::into_bstr(std::path::Path::new(name)).into_owned())
+                    .ok_or_else(|| {
+                        reference_error(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "an orphan worktree path must have a final component",
+                        )))
+                    })?,
+            };
+            let branch = worktree_local_branch_name(short_name.as_bstr())
+                .map_err(reference_error)?;
+            held_names = vec![branch.clone()];
+            orphan_branch = true;
+            (Attachment::Branch(branch), None)
+        } else {
+            let mut guessed_target = None;
+            let (start_tip, source_names) = match &attach {
+                Attachment::DetachedAt(id) => {
+                    self.find_commit(*id)
+                        .map_err(|err| reference_error(Box::new(err)))?;
+                    (*id, Vec::new())
+                }
+                Attachment::Branch(name) => {
+                    let (tip, names) = self.worktree_branch_tip(name)?;
+                    match tip {
+                        Some(tip) => {
+                            tracking_source = Some(name.clone());
+                            (tip, names)
+                        }
+                        None if requested_new_branch.is_none() && guess_remote => {
+                            let (remote_branch, tip) = self
+                                .guess_worktree_remote(name)?
+                                .ok_or_else(|| {
+                                    reference_error(Box::new(std::io::Error::new(
+                                        std::io::ErrorKind::NotFound,
+                                        format!(
+                                            "no unambiguous remote-tracking branch matches {}",
+                                            name.shorten()
+                                        ),
+                                    )))
+                                })?;
+                            tracking_source = Some(remote_branch);
+                            guessed_target = Some(name.clone());
+                            (tip, Vec::new())
+                        }
+                        None => {
+                            return Err(reference_error(Box::new(std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                format!("reference {} does not name a commit", name),
+                            ))));
+                        }
+                    }
+                }
+            };
+
+            if let Some((short_name, reset)) = requested_new_branch.as_ref() {
+                let branch = worktree_local_branch_name(short_name.as_bstr())
+                    .map_err(reference_error)?;
+                held_names = vec![branch.clone()];
+                resetting_branch = *reset;
+                creating_branch = !reset;
+                (Attachment::Branch(branch), Some(start_tip))
+            } else if let Some(branch) = guessed_target {
+                held_names = vec![branch.clone()];
+                creating_branch = true;
+                (Attachment::Branch(branch), Some(start_tip))
+            } else {
+                held_names = source_names;
+                (attach, Some(start_tip))
+            }
+        };
+
+        let tracking = match &attach {
+            Attachment::Branch(branch) => self.worktree_tracking_plan(
+                branch,
+                tracking_source.as_ref(),
+                options.track,
+                creating_branch || resetting_branch,
+                orphan_branch,
+            )?,
+            Attachment::DetachedAt(_) => {
+                if options.track.is_some() {
+                    return Err(reference_error(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "tracking requires a newly created or reset branch",
+                    ))));
+                }
+                None
+            }
+        };
+        let relative_paths = options.relative_paths || self.worktree_paths_relative();
+
+        use gix_ref::transaction::{Change, LogChange, PreviousValue, RefEdit};
+        // Keep the branch name stable until registration is published. New and reset branches are
+        // committed only after the owned registration is complete. Orphan branches retain the
+        // must-not-exist lock but deliberately never create a reference.
+        let publish_branch = creating_branch || resetting_branch;
+        let mut branch_guard = match (&attach, tip) {
+            (Attachment::Branch(name), tip) => {
+                let expected = if orphan_branch || creating_branch {
+                    PreviousValue::MustNotExist
+                } else if resetting_branch {
+                    self.try_find_reference(name.as_ref())
+                        .map_err(|err| reference_error(Box::new(err)))?
+                        .map_or(PreviousValue::MustNotExist, |reference| {
+                            PreviousValue::MustExistAndMatch(reference.target().into_owned())
+                        })
+                } else {
+                    PreviousValue::MustExistAndMatch(gix_ref::Target::Object(
+                        tip.expect("an existing branch has a commit"),
+                    ))
+                };
+                let edit = RefEdit {
+                    name: name.clone(),
+                    deref: !creating_branch && !resetting_branch && !orphan_branch,
+                    change: Change::Update {
+                        expected,
+                        new: gix_ref::Target::Object(
+                            tip.unwrap_or_else(|| self.object_hash().null()),
+                        ),
+                        log: LogChange {
+                            message: if resetting_branch {
+                                "worktree: reset branch".into()
+                            } else {
+                                "worktree: create branch".into()
+                            },
+                            ..Default::default()
+                        },
+                    },
+                };
+                Some(
+                    self.refs
+                        .transaction()
+                        .prepare(
+                            Some(edit),
+                            gix_lock::acquire::Fail::Immediately,
+                            gix_lock::acquire::Fail::Immediately,
+                        )
+                        .map_err(|err| reference_error(Box::new(err)))?,
+                )
+            }
+            _ => None,
+        };
+
+        // Recheck branch reservations while the reference transaction is held.
         if let Attachment::Branch(branch) = &attach {
+            if !creating_branch && !resetting_branch && !orphan_branch {
+                // Preparation may have observed a same-tip alias retarget. Resolve names again
+                // under the held guard so reservation checks use that exact symbolic chain.
+                held_names = self.worktree_branch_tip(branch)?.1;
+            }
             let in_use = self
                 .checked_out_branches()
                 .map_err(|err| Error::Reservation(err.into_inner()).raise())?;
-            if let Some(worktree_dirs) = in_use.get(branch) {
-                return Err(Error::BranchInUse {
-                    branch: branch.clone(),
-                    worktree_dirs: worktree_dirs.clone(),
+            if let Some(worktree_dirs) = held_names.iter().find_map(|name| in_use.get(name)) {
+                let may_share_existing_branch =
+                    options.force && !creating_branch && !resetting_branch && !orphan_branch;
+                if !may_share_existing_branch {
+                    return Err(Error::BranchInUse {
+                        branch: branch.clone(),
+                        worktree_dirs: worktree_dirs.clone(),
+                    }
+                    .raise());
                 }
-                .raise());
             }
         }
 
@@ -635,12 +898,43 @@ impl crate::Repository {
                 .open(&dot_git_path)
                 .map_err(io(&dot_git_path))?;
             dot_git_created = true;
+
+            if let Some(entry) = &replaced_registration {
+                match std::fs::remove_dir_all(&entry.admin_dir) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => return Err(io(&entry.admin_dir)(source)),
+                }
+            }
+
             // Claim the checkout first: losing contenders must not create and remove
             // administrative directories while another contender is reserving a name.
-            let (id, admin_dir) = self.reserve_worktree_id(&checkout, &entries)?;
-            if let Err(err) =
-                self.write_worktree_registration(&admin_dir, &checkout, &attach, options.lock.as_ref(), &mut dot_git)
-            {
+            let (id, admin_dir) =
+                self.reserve_worktree_id(&checkout, &entries, options.name.as_ref())?;
+            let registration: Result<(), Exn<add::Error>> = (|| {
+                self.write_worktree_registration(
+                    &admin_dir,
+                    &checkout,
+                    &attach,
+                    tip,
+                    options.lock.as_ref(),
+                    &mut dot_git,
+                    relative_paths,
+                )?;
+                if publish_branch {
+                    if let Some(guard) = branch_guard.take() {
+                        let committer = self
+                            .committer()
+                            .transpose()
+                            .map_err(|err| reference_error(Box::new(err)))?;
+                        guard
+                            .commit(committer)
+                            .map_err(|err| reference_error(Box::new(err)))?;
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(err) = registration {
                 // The exclusive mkdir, not a directory listing, established ownership.
                 std::fs::remove_dir_all(&admin_dir).ok();
                 return Err(err);
@@ -657,6 +951,40 @@ impl crate::Repository {
             }
         }
         let (id, admin_dir) = result?;
+        drop(branch_guard);
+
+        if let Some((remote, merge)) = tracking {
+            let target_branch = match &attach {
+                Attachment::Branch(branch) => branch,
+                Attachment::DetachedAt(_) => unreachable!("tracking is only planned for a branch"),
+            };
+            self.write_worktree_tracking_config(
+                target_branch,
+                remote.as_bstr(),
+                merge.as_ref(),
+            )
+            .map_err(|source| {
+                Error::Configure {
+                    id: id.clone(),
+                    path: checkout.clone(),
+                    source,
+                }
+                .raise()
+            })?;
+        }
+
+        #[cfg(feature = "worktree-mutation")]
+        if options.checkout {
+            self.checkout_added_worktree(&admin_dir, &checkout, tip)
+                .map_err(|source| {
+                    Error::Checkout {
+                        id: id.clone(),
+                        path: checkout.clone(),
+                        source,
+                    }
+                    .raise()
+                })?;
+        }
 
         Ok(add::Outcome {
             id,
@@ -699,6 +1027,16 @@ impl crate::Repository {
             });
         };
 
+        self.remove_worktree_entry(entry, options.force, options.force)
+    }
+
+    fn remove_worktree_entry(
+        &self,
+        entry: Entry,
+        force: bool,
+        allow_locked: bool,
+    ) -> Result<remove::Outcome, Exn<remove::Error>> {
+        use remove::Error;
         let status_error = |source: Box<dyn std::error::Error + Send + Sync>| {
             Error::Status {
                 id: entry.id.clone(),
@@ -718,7 +1056,7 @@ impl crate::Repository {
             }
         }
 
-        if !options.force {
+        if !allow_locked {
             if let Some(reason) = &entry.lock_reason {
                 return Err(Error::Locked {
                     id: entry.id.clone(),
@@ -726,6 +1064,8 @@ impl crate::Repository {
                 }
                 .raise());
             }
+        }
+        if !force {
             if let Some(checkout) = entry.checkout.as_deref().filter(|path| path.is_dir()) {
                 let has_index = entry
                     .admin_dir
@@ -811,8 +1151,9 @@ impl crate::Repository {
     ///
     /// This is `git worktree prune [-n] [--expire <time>]`. An entry is a candidate when its
     /// [`Condition`] is anything but [`Registered`](Condition::Registered) — the `gitdir` file is
-    /// missing, or names a checkout that is gone or no longer links back. Locked entries are never
-    /// candidates, whatever their condition, since a lock exists precisely to survive this.
+    /// missing, or names a checkout that is gone or no longer links back. Locked and valid entries
+    /// are excluded unless explicitly included. Checkout removal must be separately requested and
+    /// still refuses dirty, untracked or foreign data; including locks does not imply force.
     ///
     /// With [`expire`](prune::Options::expire), only entries whose `gitdir` file is older than the
     /// given time are removed; entries whose age cannot be determined are left alone rather than
@@ -820,12 +1161,19 @@ impl crate::Repository {
     /// candidate is returned with `removed: false`, which is also how a caller reconciles this
     /// against its own record of which worktrees are live before allowing any deletion.
     pub fn prune_worktrees(&self, options: prune::Options) -> Result<Vec<prune::Candidate>, Exn<prune::Error>> {
+        if let Some(name) = &options.name {
+            gix_validate::path::component(name.as_bstr(), None, Default::default())
+                .map_err(|err| prune::Error::InvalidName(err).raise())?;
+        }
         let mut out = Vec::new();
         for entry in self
             .worktree_admin_entries()
             .map_err(|err| prune::Error::Listing(err.into_inner()).raise())?
         {
-            if entry.condition.is_registered() || entry.is_locked() {
+            if options.name.as_ref().is_some_and(|name| *name != entry.id)
+                || (entry.condition.is_registered() && !options.include_valid)
+                || (entry.is_locked() && !options.include_locked)
+            {
                 continue;
             }
             if let Some(expire) = options.expire {
@@ -839,6 +1187,10 @@ impl crate::Repository {
 
             let removed = if options.dry_run {
                 false
+            } else if options.remove_working_tree {
+                self.remove_worktree_entry(entry.clone(), false, options.include_locked)
+                    .map_err(|err| prune::Error::Remove(err.into_inner()).raise())?
+                    .registration_removed
             } else {
                 std::fs::remove_dir_all(&entry.admin_dir).map_err(|source| {
                     prune::Error::Io {
@@ -919,7 +1271,12 @@ impl crate::Repository {
                 Condition::MissingGitdir => Action::CheckoutMissing,
                 Condition::CheckoutNotLinked => {
                     let checkout = entry.checkout.clone().expect("a checkout path was read");
-                    write_dot_git_back_pointer(&checkout, &entry.admin_dir)
+                    write_dot_git_back_pointer(
+                        &checkout,
+                        &entry.admin_dir,
+                        registration_paths_are_relative(&entry.admin_dir)
+                            || self.worktree_paths_relative(),
+                    )
                         .map_err(|source| Error::Io {
                             path: checkout.join(".git"),
                             source,
@@ -930,7 +1287,12 @@ impl crate::Repository {
                 Condition::CheckoutMissing => match relocated.get(&entry.id) {
                     None => Action::CheckoutMissing,
                     Some(new_checkout) => {
-                        write_gitdir_pointer(&entry.admin_dir, new_checkout)
+                        write_gitdir_pointer(
+                            &entry.admin_dir,
+                            new_checkout,
+                            registration_paths_are_relative(&entry.admin_dir)
+                                || self.worktree_paths_relative(),
+                        )
                             .map_err(|source| Error::Io {
                                 path: entry.admin_dir.join("gitdir"),
                                 source,
@@ -1012,8 +1374,12 @@ impl crate::Repository {
         })?;
 
         // From here the checkout has already moved, so a failure is repairable rather than lost.
-        write_gitdir_pointer(&entry.admin_dir, destination)
-            .and_then(|()| write_dot_git_back_pointer(destination, &entry.admin_dir))
+        let relative_paths =
+            registration_paths_are_relative(&entry.admin_dir) || self.worktree_paths_relative();
+        write_gitdir_pointer(&entry.admin_dir, destination, relative_paths)
+            .and_then(|()| {
+                write_dot_git_back_pointer(destination, &entry.admin_dir, relative_paths)
+            })
             .map_err(|err| {
                 Error::Repoint {
                     path: destination.to_owned(),
@@ -1031,8 +1397,10 @@ impl crate::Repository {
         admin_dir: &std::path::Path,
         checkout: &std::path::Path,
         attach: &add::Attachment,
+        tip: Option<gix_hash::ObjectId>,
         lock: Option<&Option<BString>>,
         dot_git_file: &mut std::fs::File,
+        relative_paths: bool,
     ) -> Result<(), Exn<add::Error>> {
         use add::Error;
         use std::io::Write;
@@ -1042,12 +1410,13 @@ impl crate::Repository {
         };
 
         let dot_git = checkout.join(".git");
-        write_gitdir_pointer(admin_dir, checkout).map_err(io(&admin_dir.join("gitdir")))?;
+        write_gitdir_pointer(admin_dir, checkout, relative_paths)
+            .map_err(io(&admin_dir.join("gitdir")))?;
 
         // `commondir` is relative to the administrative directory, which is always two levels down.
         std::fs::write(admin_dir.join("commondir"), b"../..\n").map_err(io(&admin_dir.join("commondir")))?;
 
-        self.write_worktree_head(admin_dir, attach)?;
+        self.write_worktree_head(admin_dir, attach, tip)?;
 
         if let Some(reason) = lock {
             let mut contents = reason.clone().unwrap_or_default();
@@ -1058,9 +1427,8 @@ impl crate::Repository {
         }
 
         // The checkout points back at us, completing the two-way link.
-        let mut contents = BString::from("gitdir: ");
-        contents.extend_from_slice(&gix_path::to_unix_separators_on_windows(gix_path::into_bstr(admin_dir)));
-        contents.push(b'\n');
+        let contents = dot_git_back_pointer_contents(checkout, admin_dir, relative_paths)
+            .map_err(io(&dot_git))?;
         dot_git_file.write_all(&contents).map_err(io(&dot_git))?;
         Ok(())
     }
@@ -1085,6 +1453,7 @@ impl crate::Repository {
         &self,
         admin_dir: &std::path::Path,
         attach: &add::Attachment,
+        tip: Option<gix_hash::ObjectId>,
     ) -> Result<(), Exn<add::Error>> {
         use add::{Attachment, Error};
         use gix_ref::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
@@ -1105,11 +1474,6 @@ impl crate::Repository {
                 // The tip is what lets `gix-ref` log a symbolic update at all. Its absence means an
                 // unborn branch rather than an error; `add_worktree` has already established that
                 // the branch is not in use elsewhere.
-                let tip = self
-                    .find_reference(name.as_ref())
-                    .ok()
-                    .and_then(|mut reference| reference.peel_to_id().ok())
-                    .map(|id| id.detach());
                 let expected = match tip {
                     Some(tip) => PreviousValue::ExistingMustMatch(gix_ref::Target::Object(tip)),
                     None => PreviousValue::MustNotExist,
@@ -1149,6 +1513,273 @@ impl crate::Repository {
         Ok(())
     }
 
+    fn worktree_branch_tip(
+        &self,
+        name: &gix_ref::FullName,
+    ) -> Result<(Option<gix_hash::ObjectId>, Vec<gix_ref::FullName>), Exn<add::Error>> {
+        let error = |source: Box<dyn std::error::Error + Send + Sync>| {
+            add::Error::Reference { source }.raise()
+        };
+        let mut names = Vec::new();
+        let mut current = name.clone();
+        loop {
+            if names.contains(&current) {
+                return Err(error(Box::new(std::io::Error::other("cyclic branch symbolic reference"))));
+            }
+            names.push(current.clone());
+            match self.try_find_reference(current.as_ref()).map_err(|err| error(Box::new(err)))? {
+                None => return Ok((None, names)),
+                Some(reference) => match reference.target() {
+                    gix_ref::TargetRef::Symbolic(next) => current = next.to_owned(),
+                    gix_ref::TargetRef::Object(id) => {
+                        self.find_commit(id.to_owned()).map_err(|err| error(Box::new(err)))?;
+                        return Ok((Some(id.to_owned()), names));
+                    }
+                },
+            }
+        }
+    }
+
+    fn guess_worktree_remote(
+        &self,
+        local_branch: &gix_ref::FullName,
+    ) -> Result<Option<(gix_ref::FullName, gix_hash::ObjectId)>, Exn<add::Error>> {
+        let error = |source: Box<dyn std::error::Error + Send + Sync>| {
+            add::Error::Reference { source }.raise()
+        };
+        let platform = self.references().map_err(|err| error(Box::new(err)))?;
+        let references = platform
+            .remote_branches()
+            .map_err(|err| error(Box::new(err)))?;
+        let mut candidates = Vec::new();
+        for reference in references {
+            let mut reference = reference.map_err(error)?;
+            let tracking_branch = reference.name().to_owned();
+            let mapping = self
+                .upstream_branch_and_remote_for_tracking_branch(tracking_branch.as_ref())
+                .map_err(|err| error(Box::new(err)))?;
+            let Some((upstream, remote)) = mapping else {
+                continue;
+            };
+            if upstream.shorten() != local_branch.shorten() {
+                continue;
+            }
+            let Some(remote_name) = remote.name() else {
+                continue;
+            };
+            let tip = reference
+                .peel_to_id()
+                .map_err(|err| error(Box::new(err)))?
+                .detach();
+            self.find_commit(tip)
+                .map_err(|err| error(Box::new(err)))?;
+            candidates.push((tracking_branch, tip, remote_name.as_bstr().to_owned()));
+        }
+
+        if candidates.len() == 1 {
+            return Ok(candidates.pop().map(|(branch, tip, _)| (branch, tip)));
+        }
+        if let Some(preferred) = self.config_snapshot().string("checkout.defaultRemote") {
+            let mut preferred_candidates = candidates
+                .into_iter()
+                .filter(|(_, _, remote)| remote == &preferred);
+            if let Some((branch, tip, _)) = preferred_candidates.next() {
+                if preferred_candidates.next().is_none() {
+                    return Ok(Some((branch, tip)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn worktree_tracking_plan(
+        &self,
+        target_branch: &gix_ref::FullName,
+        source_branch: Option<&gix_ref::FullName>,
+        requested: Option<bool>,
+        branch_is_created_or_reset: bool,
+        orphan: bool,
+    ) -> Result<Option<(BString, gix_ref::FullName)>, Exn<add::Error>> {
+        let error = |source: Box<dyn std::error::Error + Send + Sync>| {
+            add::Error::Reference { source }.raise()
+        };
+        if requested.is_some() && (!branch_is_created_or_reset || orphan) {
+            return Err(error(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "tracking requires a non-orphan newly created or reset branch",
+            ))));
+        }
+        if requested == Some(false) {
+            return Ok(None);
+        }
+        let Some(source_branch) = source_branch else {
+            if requested == Some(true) {
+                return Err(error(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "tracking requires a branch start point",
+                ))));
+            }
+            return Ok(None);
+        };
+
+        let config = self.config_snapshot();
+        let auto_setup = config.string("branch.autoSetupMerge");
+        if requested.is_none()
+            && auto_setup
+                .as_ref()
+                .is_some_and(|value| value.as_bstr().eq_ignore_ascii_case(b"inherit"))
+        {
+            if source_branch.category() != Some(gix_ref::Category::LocalBranch) {
+                return Ok(None);
+            }
+            let remote = config.string_by("branch", Some(source_branch.shorten()), "remote");
+            let merge = config.string_by("branch", Some(source_branch.shorten()), "merge");
+            return match remote.zip(merge) {
+                Some((remote, merge)) => {
+                    let merge = gix_ref::FullName::try_from(merge)
+                        .map_err(|err| error(Box::new(err)))?;
+                    Ok(Some((remote, merge)))
+                }
+                None => Ok(None),
+            };
+        }
+
+        let (candidate, source_is_remote) = match source_branch.category() {
+            Some(gix_ref::Category::RemoteBranch) => {
+                let mapping = self
+                    .upstream_branch_and_remote_for_tracking_branch(source_branch.as_ref())
+                    .map_err(|err| error(Box::new(err)))?;
+                let Some((upstream, remote)) = mapping else {
+                    if requested == Some(true) {
+                        return Err(error(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "the remote-tracking branch has no unambiguous configured remote",
+                        ))));
+                    }
+                    return Ok(None);
+                };
+                let remote = remote.name().ok_or_else(|| {
+                    error(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "an anonymous remote cannot configure branch tracking",
+                    )))
+                })?;
+                ((remote.as_bstr().to_owned(), upstream), true)
+            }
+            Some(gix_ref::Category::LocalBranch) => {
+                ((BString::from("."), source_branch.clone()), false)
+            }
+            _ => {
+                if requested == Some(true) {
+                    return Err(error(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "tracking requires a local or remote-tracking branch",
+                    ))));
+                }
+                return Ok(None);
+            }
+        };
+
+        if requested == Some(true) {
+            return Ok(Some(candidate));
+        }
+        let mode = auto_setup.as_ref().map(|value| value.as_bstr());
+        let enabled = if mode.is_some_and(|value| value.eq_ignore_ascii_case(b"always")) {
+            true
+        } else if mode.is_some_and(|value| value.eq_ignore_ascii_case(b"simple")) {
+            source_is_remote && target_branch.shorten() == candidate.1.shorten()
+        } else {
+            let configured = config
+                .try_boolean("branch.autoSetupMerge")
+                .map_err(|err| error(Box::new(err)))?
+                .unwrap_or(true);
+            configured && source_is_remote
+        };
+        Ok(enabled.then_some(candidate))
+    }
+
+    fn write_worktree_tracking_config(
+        &self,
+        branch: &gix_ref::FullName,
+        remote: &crate::bstr::BStr,
+        merge: &gix_ref::FullNameRef,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let config_path = self.common_dir().join("config");
+        let mut config =
+            gix_config::File::from_path_no_includes(config_path.clone(), gix_config::Source::Local)?;
+        {
+            let mut section =
+                config.section_mut_or_create_new("branch", Some(branch.shorten()))?;
+            while section.remove("remote").is_some() {}
+            while section.remove("merge").is_some() {}
+            section.set("remote", remote)?;
+            section.set("merge", merge.as_bstr())?;
+        }
+        let mut lock = gix_lock::File::acquire_to_update_resource(
+            &config_path,
+            gix_lock::acquire::Fail::Immediately,
+            None,
+        )?;
+        config.write_to_filter(&mut lock, |section| {
+            section.meta().source == gix_config::Source::Local
+        })?;
+        lock.commit()?;
+        Ok(())
+    }
+
+    fn worktree_paths_relative(&self) -> bool {
+        self.config_snapshot()
+            .boolean("worktree.useRelativePaths")
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "worktree-mutation")]
+    fn checkout_added_worktree(
+        &self,
+        admin_dir: &Path,
+        checkout: &Path,
+        tip: Option<gix_hash::ObjectId>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let repo = crate::worktree::Proxy::new(self, admin_dir.to_owned()).into_repo()?;
+        let index_path = repo.index_path();
+        let mut index_lock = gix_lock::File::acquire_to_update_resource(
+            &index_path, gix_lock::acquire::Fail::Immediately, None,
+        )?;
+        if index_path.try_exists()? {
+            return Err(std::io::Error::other("another writer already created the worktree index").into());
+        }
+        let mut index = match tip {
+            Some(id) => repo.index_from_tree(&repo.find_commit(id)?.tree_id()?)?,
+            None => gix_index::File::from_state(gix_index::State::new(repo.object_hash()), repo.index_path()),
+        };
+        let mut options = repo.checkout_options(gix_worktree::stack::state::attributes::Source::IdMapping)?;
+        options.destination_is_initially_empty = true;
+        options.overwrite_existing = false;
+        options.keep_going = false;
+        let outcome = gix_worktree_state::checkout(
+            &mut index,
+            checkout,
+            repo.objects.clone().into_arc()?,
+            &gix_features::progress::Discard,
+            &gix_features::progress::Discard,
+            &std::sync::atomic::AtomicBool::new(false),
+            options,
+        )?;
+        // Persist recovery information even when a collision prevented complete checkout.
+        index.write_to(&mut index_lock, Default::default())?;
+        index_lock.commit()?;
+        if !outcome.collisions.is_empty() || !outcome.errors.is_empty()
+            || !outcome.delayed_paths_unknown.is_empty() || !outcome.delayed_paths_unprocessed.is_empty()
+        {
+            return Err(std::io::Error::other(format!(
+                "checkout reported {} collisions, {} errors and {} unprocessed paths",
+                outcome.collisions.len(), outcome.errors.len(),
+                outcome.delayed_paths_unknown.len() + outcome.delayed_paths_unprocessed.len(),
+            )).into());
+        }
+        Ok(())
+    }
+
     /// Reserve an administrative directory derived from the checkout's final component.
     ///
     /// As in Git, only a successful exclusive mkdir establishes ownership. A collided entry,
@@ -1157,11 +1788,17 @@ impl crate::Repository {
         &self,
         checkout: &std::path::Path,
         entries: &[Entry],
+        name: Option<&BString>,
     ) -> Result<(BString, PathBuf), Exn<add::Error>> {
-        let base: BString = checkout
-            .file_name()
-            .map(|name| gix_path::into_bstr(std::path::Path::new(name)).into_owned())
-            .unwrap_or_else(|| "worktree".into());
+        if let Some(name) = name {
+            gix_validate::path::component(name.as_bstr(), None, Default::default())
+                .map_err(|err| add::Error::InvalidName(err).raise())?;
+        }
+        let base: BString = name.cloned().unwrap_or_else(|| {
+            checkout.file_name()
+                .map(|name| gix_path::into_bstr(std::path::Path::new(name)).into_owned())
+                .unwrap_or_else(|| "worktree".into())
+        });
         let parent = self.common_dir().join("worktrees");
         std::fs::create_dir_all(&parent).map_err(|source| {
             add::Error::Io {
@@ -1179,12 +1816,26 @@ impl crate::Repository {
                 .iter()
                 .any(|entry| entry.id.to_ascii_lowercase() == id.to_ascii_lowercase())
             {
+                if name.is_some() {
+                    return Err(add::Error::IdentifierExists { id }.raise());
+                }
                 continue;
             }
-            let admin_dir = parent.join(gix_path::from_bstr(id.as_bstr()).as_ref());
+            let component = gix_path::try_from_byte_slice(id.as_slice()).map_err(|error| {
+                add::Error::Io {
+                    path: parent.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidInput, error),
+                }.raise()
+            })?;
+            let admin_dir = parent.join(component);
             match std::fs::create_dir(&admin_dir) {
                 Ok(()) => return Ok((id, admin_dir)),
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if name.is_some() {
+                        return Err(add::Error::IdentifierExists { id }.raise());
+                    }
+                    continue;
+                }
                 Err(source) => {
                     return Err(add::Error::Io {
                         path: admin_dir,
@@ -1211,25 +1862,117 @@ impl crate::Repository {
     }
 }
 
-/// Write `admin_dir/gitdir`, naming the `.git` file inside `checkout`.
-///
-/// Git records an absolute path here, with forward slashes even on Windows.
-fn write_gitdir_pointer(admin_dir: &std::path::Path, checkout: &std::path::Path) -> std::io::Result<()> {
+/// Write admin_dir/gitdir, naming the .git file inside checkout.
+fn write_gitdir_pointer(
+    admin_dir: &std::path::Path,
+    checkout: &std::path::Path,
+    relative: bool,
+) -> std::io::Result<()> {
+    let target = checkout.join(".git");
+    let target = if relative {
+        path_relative_to(admin_dir, &target)?
+    } else {
+        target
+    };
     let mut contents =
-        gix_path::to_unix_separators_on_windows(gix_path::into_bstr(checkout.join(".git"))).into_owned();
+        gix_path::to_unix_separators_on_windows(gix_path::into_bstr(target)).into_owned();
     contents.push(b'\n');
     std::fs::write(admin_dir.join("gitdir"), &contents)
 }
 
-/// Write the `.git` file inside `checkout`, naming `admin_dir`.
+/// Write the .git file inside checkout, naming admin_dir.
 ///
-/// This is the other half of the two-way link, and the half `git worktree repair` restores when a
-/// checkout has been copied or its `.git` file lost.
-fn write_dot_git_back_pointer(checkout: &std::path::Path, admin_dir: &std::path::Path) -> std::io::Result<()> {
-    let mut contents = BString::from("gitdir: ");
-    contents.extend_from_slice(&gix_path::to_unix_separators_on_windows(gix_path::into_bstr(admin_dir)));
-    contents.push(b'\n');
+/// This is the other half of the two-way link, and the half git worktree repair restores when a
+/// checkout has been copied or its .git file lost.
+fn write_dot_git_back_pointer(
+    checkout: &std::path::Path,
+    admin_dir: &std::path::Path,
+    relative: bool,
+) -> std::io::Result<()> {
+    let contents = dot_git_back_pointer_contents(checkout, admin_dir, relative)?;
     std::fs::write(checkout.join(".git"), &contents)
+}
+
+fn dot_git_back_pointer_contents(
+    checkout: &std::path::Path,
+    admin_dir: &std::path::Path,
+    relative: bool,
+) -> std::io::Result<BString> {
+    let target = if relative {
+        path_relative_to(checkout, admin_dir)?
+    } else {
+        admin_dir.to_owned()
+    };
+    let mut contents = BString::from("gitdir: ");
+    contents.extend_from_slice(
+        &gix_path::to_unix_separators_on_windows(gix_path::into_bstr(target)),
+    );
+    contents.push(b'\n');
+    Ok(contents)
+}
+
+fn registration_paths_are_relative(admin_dir: &std::path::Path) -> bool {
+    std::fs::read(admin_dir.join("gitdir"))
+        .ok()
+        .map(|contents| {
+            gix_path::from_bstr(contents.trim().as_bstr())
+                .as_ref()
+                .is_relative()
+        })
+        .unwrap_or(false)
+}
+
+fn path_relative_to(
+    from_directory: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+
+    let from = from_directory.components().collect::<Vec<_>>();
+    let to = target.components().collect::<Vec<_>>();
+    let common = from
+        .iter()
+        .zip(to.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    if from_directory.is_absolute() != target.is_absolute()
+        || (from_directory.is_absolute() && common == 0)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cannot make paths on different roots relative",
+        ));
+    }
+
+    let mut out = PathBuf::new();
+    for component in &from[common..] {
+        match component {
+            Component::Normal(_) | Component::ParentDir => out.push(".."),
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "cannot make paths on different roots relative",
+                ));
+            }
+        }
+    }
+    for component in &to[common..] {
+        out.push(component.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    Ok(out)
+}
+
+fn worktree_local_branch_name(
+    short_name: &crate::bstr::BStr,
+) -> Result<gix_ref::FullName, Box<dyn std::error::Error + Send + Sync>> {
+    let mut full = BString::from("refs/heads/");
+    full.extend_from_slice(short_name);
+    gix_validate::reference::branch_name(full.as_bstr())?;
+    Ok(gix_ref::FullName::try_from(full)?)
 }
 
 /// Record the worktree directory under `HEAD` and every reference in its symbolic referent chain.
