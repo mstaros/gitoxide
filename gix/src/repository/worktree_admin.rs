@@ -534,7 +534,8 @@ impl crate::Repository {
     /// use by another worktree — including one held by an in-progress rebase or bisect — is
     /// refused, matching Git.
     ///
-    /// Administrative directories and the checkout's `.git` file are reserved exclusively.
+    /// The checkout's `.git` file is reserved exclusively before its administrative directory,
+    /// so calls which lose the checkout claim never create or remove administrative directories.
     /// Identifier collisions are retried with a numeric suffix, including incomplete registrations.
     /// On failure, cleanup removes only paths reserved by this call. A newly created checkout is
     /// removed only if it is still empty, preserving files concurrently placed there by others.
@@ -611,7 +612,6 @@ impl crate::Repository {
             }
         }
 
-        let (id, admin_dir) = self.reserve_worktree_id(&checkout, &entries)?;
         let dot_git_path = checkout.join(".git");
         let mut checkout_created = false;
         let mut dot_git_created = false;
@@ -635,7 +635,17 @@ impl crate::Repository {
                 .open(&dot_git_path)
                 .map_err(io(&dot_git_path))?;
             dot_git_created = true;
-            self.write_worktree_registration(&admin_dir, &checkout, &attach, options.lock.as_ref(), &mut dot_git)
+            // Claim the checkout first: losing contenders must not create and remove
+            // administrative directories while another contender is reserving a name.
+            let (id, admin_dir) = self.reserve_worktree_id(&checkout, &entries)?;
+            if let Err(err) =
+                self.write_worktree_registration(&admin_dir, &checkout, &attach, options.lock.as_ref(), &mut dot_git)
+            {
+                // The exclusive mkdir, not a directory listing, established ownership.
+                std::fs::remove_dir_all(&admin_dir).ok();
+                return Err(err);
+            }
+            Ok((id, admin_dir))
         })();
         if result.is_err() {
             if dot_git_created {
@@ -645,10 +655,8 @@ impl crate::Repository {
                 // Leave any files concurrently added by someone else intact.
                 std::fs::remove_dir(&checkout).ok();
             }
-            // The exclusive mkdir above, not a directory listing, established ownership.
-            std::fs::remove_dir_all(&admin_dir).ok();
         }
-        result?;
+        let (id, admin_dir) = result?;
 
         Ok(add::Outcome {
             id,

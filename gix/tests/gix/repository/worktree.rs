@@ -54,6 +54,32 @@ mod registration_safety {
     }
 
     #[test]
+    fn a_failed_checkout_claim_does_not_create_administrative_directories() -> crate::Result {
+        let temp = gix_testtools::tempfile::TempDir::new()?;
+        let repo = gix::init(temp.path().join("repo"))?;
+        let checkout = temp.path().join("occupied");
+        std::fs::write(&checkout, b"belongs to someone else\n")?;
+        let admin_parent = repo.common_dir().join("worktrees");
+        assert!(!admin_parent.exists());
+
+        let error = repo
+            .add_worktree(
+                &checkout,
+                add::Attachment::DetachedAt(gix::ObjectId::null(repo.object_hash())),
+                add::Options::default(),
+            )
+            .expect_err("a file cannot become a checkout");
+        assert!(
+            matches!(error.into_inner(), add::Error::Io { path, source }
+                if path == checkout && source.kind() == std::io::ErrorKind::AlreadyExists),
+            "the exclusive checkout claim reports the collision"
+        );
+        assert_eq!(std::fs::read(&checkout)?, b"belongs to someone else\n");
+        assert!(!admin_parent.exists(), "a failed checkout claim never creates administrative directories");
+        Ok(())
+    }
+
+    #[test]
     fn concurrent_same_basename_registrations_keep_distinct_owners() -> crate::Result {
         let (temp, repo, _existing) = fixture(false)?;
         let paths = (0..16)
@@ -90,7 +116,7 @@ mod registration_safety {
                     Err(error) => match error.into_inner() {
                         add::Error::AlreadyRegistered { .. } | add::Error::DirectoryNotEmpty { .. } => {}
                         add::Error::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists => {}
-                        error => panic!("unexpected registration failure: {error}"),
+                        error => panic!("unexpected registration failure: {error:?}"),
                     },
                 }
             }
