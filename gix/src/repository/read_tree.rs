@@ -14,21 +14,21 @@ use crate::{
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Options for the two-tree form of [Repository::read_tree()].
+/// Options for the one- and two-tree forms of [Repository::read_tree()].
 ///
-/// The default is Git's two-tree -m operation. Select update_worktree for -u.
+/// The default is Git's `-m` operation. Select `update_worktree` for `-u`.
 /// Reset is destructive and must be selected instead of merge.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Carry local index changes forward (-m).
+    /// Select merge behavior (`-m`).
     pub merge: bool,
-    /// Also update affected working-tree paths (-u).
+    /// Also update affected working-tree paths (`-u`).
     pub update_worktree: bool,
-    /// Discard ordinary working-tree modifications and overwrite obstructions (--reset).
+    /// Discard ordinary working-tree modifications and overwrite obstructions (`--reset`).
     /// Git still checks assumed-valid and skip-worktree entries for modifications.
     /// Staged changes follow the two-tree carry-forward rules.
     pub reset: bool,
-    /// Do not inspect or update the worktree (-i).
+    /// Do not inspect or update the worktree (`-i`).
     pub index_only: bool,
     /// Perform validation without writing the index or working tree.
     pub dry_run: bool,
@@ -61,7 +61,7 @@ impl Default for Options {
     }
 }
 
-/// A successfully validated or applied two-tree transition.
+/// A successfully validated or applied tree-to-index transition.
 #[derive(Debug)]
 pub struct Outcome {
     /// Paths selected by the transition, including deletions already absent from the index.
@@ -80,11 +80,11 @@ pub enum Error {
     Unsupported { option: &'static str },
     #[error("Invalid read-tree options: {reason}")]
     InvalidOptions { reason: &'static str },
-    #[error("A working tree is required unless index_only is set")]
+    #[error("A working tree is required for this read-tree transition")]
     MissingWorktree,
     #[error("Could not lock the index")]
     IndexLock(#[source] gix_lock::acquire::Error),
-    #[error("Resolve the unmerged index before a two-tree merge")]
+    #[error("Resolve the unmerged index before a read-tree merge")]
     UnmergedIndex,
     #[error("The transition would overwrite staged changes at {paths:?}")]
     IndexConflict { paths: Vec<BString> },
@@ -92,7 +92,7 @@ pub enum Error {
     DirtyWorktree { paths: Vec<BString> },
     #[error("Working-tree paths obstruct the transition: {paths:?}")]
     Obstructed { paths: Vec<BString> },
-    #[error("Could not prepare the two-tree transition: {operation}")]
+    #[error("Could not prepare the read-tree transition: {operation}")]
     Prepare {
         operation: &'static str,
         #[source]
@@ -118,19 +118,26 @@ fn prepare(operation: &'static str, source: impl std::error::Error + Send + Sync
 
 fn validate(trees: &[gix_hash::ObjectId], options: &Options) -> Result<(), Error> {
     for (set, option) in [
-        (trees.len() != 2, "only the two-tree form is supported"),
+        (!matches!(trees.len(), 1 | 2), "only one- and two-tree forms are supported"),
         (options.prefix.is_some(), "--prefix"),
         (options.index_output.is_some(), "--index-output"),
         (options.aggressive, "--aggressive"),
         (options.trivial, "--trivial"),
         (options.recurse_submodules, "--recurse-submodules"),
+        (trees.len() == 1 && options.update_worktree, "one-tree worktree update"),
     ] {
         if set {
             return Err(Error::Unsupported { option });
         }
     }
-    if options.merge == options.reset {
-        return Err(Error::InvalidOptions { reason: "select exactly one of merge and reset" });
+    if options.merge && options.reset {
+        return Err(Error::InvalidOptions { reason: "merge and reset are mutually exclusive" });
+    }
+    if trees.len() == 2 && !options.merge && !options.reset {
+        return Err(Error::InvalidOptions { reason: "select merge or reset for two trees" });
+    }
+    if trees.len() == 1 && !options.merge && !options.reset && options.index_only {
+        return Err(Error::InvalidOptions { reason: "index_only requires merge or reset" });
     }
     if options.index_only && options.update_worktree {
         return Err(Error::InvalidOptions { reason: "index_only and update_worktree are mutually exclusive" });
@@ -151,11 +158,17 @@ fn same(left: Option<&gix_index::Entry>, right: Option<&gix_index::Entry>) -> bo
 }
 
 impl Repository {
-    /// Carry the index from the first tree to the second using Git's two-tree merge rules.
+    /// Replace the index from one tree, or carry it from the first tree to the second
+    /// using Git's two-tree merge rules.
     ///
-    /// Both inputs must be tree object IDs. Local index changes on unaffected paths,
-    /// and changes already matching the new tree, are retained. Otherwise the index
-    /// must match the old tree and affected tracked files must be clean.
+    /// With one input, clearing both `merge` and `reset` selects the plain form,
+    /// the default selects `-m`, and `reset` selects `--reset`. None update the
+    /// worktree. The `-m` form checks replaced tracked paths unless `index_only`
+    /// selects Git's `-i` behavior.
+    ///
+    /// With two inputs, local index changes on unaffected paths and changes already
+    /// matching the new tree are retained. Otherwise the index must match the old
+    /// tree and affected tracked files must be clean.
     ///
     /// The index is opened from disk after acquiring its lock. All overlap checks
     /// precede worktree changes, and index publication follows successful application.
@@ -167,16 +180,16 @@ impl Repository {
     /// Coordinate other writers through the caller's repository lease: the index
     /// lock cannot serialize editors which write working-tree files directly.
     ///
-    /// One-tree and three-tree forms, compressed sparse indexes and the explicitly
-    /// unsupported options in [Options] are rejected. Cone and pattern sparse checkout
-    /// with an ordinary index are supported.
+    /// Three-tree forms, compressed sparse indexes and the explicitly unsupported
+    /// options in [Options] are rejected. One-tree worktree updates and sparse checkout
+    /// are also rejected; ordinary-index sparse checkout is supported for two trees.
     pub fn read_tree(&self, trees: &[gix_hash::ObjectId], options: Options) -> Result<Outcome, Exn<Error>> {
         self.read_tree_inner(trees, &options).map_err(ErrorExt::raise)
     }
 
     fn read_tree_inner(&self, trees: &[gix_hash::ObjectId], options: &Options) -> Result<Outcome, Error> {
         validate(trees, options)?;
-        let workdir = if options.index_only {
+        let workdir = if options.index_only || (trees.len() == 1 && !options.merge) {
             None
         } else {
             Some(self.workdir().ok_or(Error::MissingWorktree)?)
@@ -199,8 +212,89 @@ impl Repository {
         let unmerged: BTreeSet<_> = current.entries().iter()
             .filter(|entry| entry.stage_raw() != 0)
             .map(|entry| entry.path(&current).to_owned()).collect();
-        if !options.reset && !unmerged.is_empty() {
+        if options.merge && !unmerged.is_empty() {
             return Err(Error::UnmergedIndex);
+        }
+        if trees.len() == 1 {
+            if self
+                .list_sparse_checkout()
+                .map_err(|err| prepare("read sparse definition", err))?
+                .is_some()
+            {
+                return Err(Error::Unsupported { option: "one-tree sparse checkout" });
+            }
+            let mut result = self
+                .index_from_tree(&trees[0])
+                .map_err(|err| prepare("read replacement tree", err))?;
+            reject_colliding_paths(&result, self.config.ignore_case)?;
+            let current_entries = entries(&current);
+            let target_entries = entries(&result);
+            if options.merge && !options.index_only {
+                let workdir = workdir.expect("one-tree merge requires a validated worktree");
+                let mut candidates = Vec::new();
+                for (idx, entry) in current.entries().iter().enumerate() {
+                    if !same(Some(entry), target_entries.get(entry.path(&current)).copied())
+                        && sparse_checkout::path_presence(self, workdir, entry.path(&current), entry.mode)
+                            .map_err(|err| prepare("inspect tracked path", err))?
+                            != sparse_checkout::Presence::Missing
+                    {
+                        candidates.push(idx);
+                    }
+                }
+                let mut dirty = sparse_checkout::dirty_entries(self, workdir, &current, &candidates)
+                    .map_err(|err| prepare("inspect tracked modifications", err))?;
+                for idx in &candidates {
+                    if current.entries()[*idx]
+                        .flags
+                        .contains(gix_index::entry::Flags::INTENT_TO_ADD)
+                    {
+                        dirty.insert(*idx);
+                    }
+                }
+                if !dirty.is_empty() {
+                    let mut paths = dirty
+                        .into_iter()
+                        .map(|idx| current.entries()[idx].path(&current).to_owned())
+                        .collect::<Vec<_>>();
+                    paths.sort();
+                    return Err(Error::DirtyWorktree { paths });
+                }
+            }
+            if options.merge || options.reset {
+                for (entry, path) in result.entries_mut_with_paths() {
+                    if let Some(current_entry) = current_entries
+                        .get(path)
+                        .copied()
+                        .filter(|current_entry| current_entry.stage_raw() == 0)
+                        .filter(|current_entry| same(Some(current_entry), Some(entry)))
+                    {
+                        entry.stat = current_entry.stat;
+                        entry.flags = current_entry.flags;
+                    }
+                }
+            }
+            let index_paths = current
+                .entries()
+                .iter()
+                .map(|entry| entry.path(&current).to_owned())
+                .chain(result.entries().iter().map(|entry| entry.path(&result).to_owned()))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let outcome = Outcome {
+                index_paths,
+                worktree_paths: Vec::new(),
+                dry_run: options.dry_run,
+            };
+            if options.dry_run {
+                return Ok(outcome);
+            }
+            result
+                .write_to(&mut lock, Default::default())
+                .map_err(|err| prepare("write replacement index", err))?;
+            lock.commit()
+                .map_err(|err| prepare("commit replacement index", err))?;
+            return Ok(outcome);
         }
         let old = self.index_from_tree(&trees[0]).map_err(|err| prepare("read old tree", err))?;
         let new = self.index_from_tree(&trees[1]).map_err(|err| prepare("read new tree", err))?;

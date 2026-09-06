@@ -215,6 +215,88 @@ fn compare_with_git(name: &str, options: Options, sparse: bool) -> crate::Result
     Ok(())
 }
 
+fn compare_one_tree_with_git(name: &str, options: Options) -> crate::Result {
+    let (actual_root, actual, actual_trees) = fixture()?;
+    let (baseline_root, baseline, baseline_trees) = fixture()?;
+    scenario(actual_root.path(), name)?;
+    scenario(baseline_root.path(), name)?;
+    let before_files = files(actual_root.path())?;
+    let before_index = std::fs::read(actual.index_path())?;
+
+    let mut args = vec!["read-tree"];
+    if options.merge {
+        args.push("-m");
+    }
+    if options.reset {
+        args.push("--reset");
+    }
+    if options.index_only {
+        args.push("-i");
+    }
+    if options.dry_run {
+        args.push("--dry-run");
+    }
+    let target = baseline_trees[1].to_string();
+    args.push(target.as_str());
+
+    let expected = git(baseline_root.path(), &args)?;
+    let result = actual.read_tree(&actual_trees[1..], options.clone());
+    assert_eq!(
+        result.is_ok(), expected.status.success(),
+        "{name}: gix={result:?}; Git={}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    if expected.status.success() {
+        assert_eq!(index_state(&actual)?, index_state(&baseline)?, "{name}: complete one-tree index semantics");
+    } else {
+        assert!(matches!(
+            result.expect_err("Git refused the same one-tree transition").into_inner(),
+            Error::DirtyWorktree { .. }
+        ));
+    }
+    assert_eq!(
+        files(actual_root.path())?,
+        before_files,
+        "{name}: one-tree index replacement never changes worktree bytes"
+    );
+    if options.dry_run || !expected.status.success() {
+        assert_eq!(std::fs::read(actual.index_path())?, before_index, "{name}: untouched index bytes");
+    }
+    assert!(!actual.index_path().with_extension("lock").exists());
+    Ok(())
+}
+
+#[test]
+fn one_tree_index_replacement_matches_git() -> crate::Result {
+    for name in [
+        "clean",
+        "disjoint",
+        "staged overlap",
+        "unstaged overlap",
+        "untracked overlap",
+        "already staged target",
+        "staged target deletion",
+        "staged disjoint deletion",
+        "staged overlapping deletion",
+        "missing tracked file",
+        "intent to add",
+    ] {
+        for options in [
+            Options { merge: false, ..Default::default() },
+            Options::default(),
+            Options { merge: false, reset: true, ..Default::default() },
+            Options { index_only: true, ..Default::default() },
+            Options { merge: false, reset: true, index_only: true, ..Default::default() },
+            Options { merge: false, dry_run: true, ..Default::default() },
+            Options { dry_run: true, ..Default::default() },
+            Options { merge: false, reset: true, dry_run: true, ..Default::default() },
+        ] {
+            compare_one_tree_with_git(name, options)?;
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn two_tree_carry_forward_matches_git() -> crate::Result {
     for name in [
@@ -248,6 +330,31 @@ fn cone_checkout_keeps_an_ordinary_index() -> crate::Result {
 }
 
 #[test]
+fn one_tree_sparse_checkout_is_explicitly_unsupported() -> crate::Result {
+    let (root, mut repo, trees) = fixture()?;
+    repo.set_sparse_checkout(
+        gix::repository::sparse_checkout::set::Options {
+            cone: Some(true),
+            sparse_index: Some(false),
+            ..Default::default()
+        },
+        ["inside"],
+    )?;
+    let before_index = std::fs::read(repo.index_path())?;
+    let before_files = files(root.path())?;
+    assert!(matches!(
+        repo.read_tree(&trees[1..], Options { merge: false, ..Default::default() })
+            .expect_err("one-tree sparse checkout")
+            .into_inner(),
+        Error::Unsupported { option: "one-tree sparse checkout" }
+    ));
+    assert_eq!(std::fs::read(repo.index_path())?, before_index);
+    assert_eq!(files(root.path())?, before_files);
+    assert!(!repo.index_path().with_extension("lock").exists());
+    Ok(())
+}
+
+#[test]
 fn unsupported_options_and_index_locks_leave_no_changes() -> crate::Result {
     let (root, repo, trees) = fixture()?;
     let before_index = std::fs::read(repo.index_path())?;
@@ -260,15 +367,49 @@ fn unsupported_options_and_index_locks_leave_no_changes() -> crate::Result {
     ] {
         assert!(matches!(repo.read_tree(&trees, options).expect_err("unsupported option").into_inner(), Error::Unsupported { .. }));
     }
-    assert!(matches!(repo.read_tree(&trees[..1], Options::default()).expect_err("one tree").into_inner(), Error::Unsupported { .. }));
-    assert!(matches!(repo.read_tree(&[trees[0], trees[0], trees[1]], Options::default()).expect_err("three trees").into_inner(), Error::Unsupported { .. }));
+    assert!(matches!(
+        repo.read_tree(&[], Options::default())
+            .expect_err("zero trees")
+            .into_inner(),
+        Error::Unsupported { .. }
+    ));
+    assert!(matches!(
+        repo.read_tree(&trees[..1], Options { update_worktree: true, ..Default::default() })
+            .expect_err("one-tree worktree update")
+            .into_inner(),
+        Error::Unsupported { .. }
+    ));
+    assert!(matches!(
+        repo.read_tree(&trees[..1], Options { merge: false, index_only: true, ..Default::default() })
+            .expect_err("plain one-tree index-only")
+            .into_inner(),
+        Error::InvalidOptions { .. }
+    ));
+    assert!(matches!(
+        repo.read_tree(&trees[..1], Options { reset: true, ..Default::default() })
+            .expect_err("merge and reset")
+            .into_inner(),
+        Error::InvalidOptions { .. }
+    ));
+    assert!(matches!(
+        repo.read_tree(&[trees[0], trees[0], trees[1]], Options::default())
+            .expect_err("three trees")
+            .into_inner(),
+        Error::Unsupported { .. }
+    ));
     let lock_path = repo.git_dir().join("index.lock");
     std::fs::write(&lock_path, b"another writer")?;
-    assert!(matches!(
-        repo.read_tree(&trees, Options { update_worktree: true, ..Default::default() })
-            .expect_err("respect the existing index lock").into_inner(),
-        Error::IndexLock(_)
-    ));
+    for (input, options) in [
+        (&trees[..1], Options { merge: false, ..Default::default() }),
+        (&trees[..], Options { update_worktree: true, ..Default::default() }),
+    ] {
+        assert!(matches!(
+            repo.read_tree(input, options)
+                .expect_err("respect the existing index lock")
+                .into_inner(),
+            Error::IndexLock(_)
+        ));
+    }
     assert_eq!(std::fs::read(&lock_path)?, b"another writer");
     assert_eq!(std::fs::read(repo.index_path())?, before_index);
     assert_eq!(files(root.path())?, before_files);
@@ -402,6 +543,50 @@ fn conflict(repo: &gix::Repository) -> crate::Result {
     index.write(Default::default())?;
     Ok(())
 }
+
+#[test]
+fn one_tree_unmerged_index_matches_git() -> crate::Result {
+    for options in [
+        Options { merge: false, ..Default::default() },
+        Options::default(),
+        Options { merge: false, reset: true, ..Default::default() },
+    ] {
+        let (root, repo, trees) = fixture()?;
+        let (baseline_root, baseline, baseline_trees) = fixture()?;
+        conflict(&repo)?;
+        conflict(&baseline)?;
+        let before_files = files(root.path())?;
+        let before_index = std::fs::read(repo.index_path())?;
+
+        let mut args = vec!["read-tree"];
+        if options.merge {
+            args.push("-m");
+        }
+        if options.reset {
+            args.push("--reset");
+        }
+        let target = baseline_trees[1].to_string();
+        args.push(target.as_str());
+
+        let expected = git(baseline_root.path(), &args)?;
+        let actual = repo.read_tree(&trees[1..], options);
+        assert_eq!(
+            actual.is_ok(), expected.status.success(),
+            "gix={actual:?}; Git={}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert_eq!(index_state(&repo)?, index_state(&baseline)?, "one-tree conflict handling matches Git");
+        assert_eq!(files(root.path())?, before_files, "one-tree conflict handling never changes worktree bytes");
+        if expected.status.success() {
+            assert!(actual?.worktree_paths.is_empty());
+        } else {
+            assert!(matches!(actual.expect_err("one-tree merge refuses an unmerged index").into_inner(), Error::UnmergedIndex));
+            assert_eq!(std::fs::read(repo.index_path())?, before_index);
+        }
+    }
+    Ok(())
+}
+
 
 #[test]
 fn unmerged_indexes_are_refused_or_reset_like_git() -> crate::Result {
